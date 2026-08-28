@@ -1,6 +1,6 @@
 # べぬケアごはん
 
-`dogcalplan.md` の仕様に基づく、犬の食事・水分管理PWAです。データは外部へ送信せず、ブラウザのIndexedDBへ保存します。
+`dogcalplan.md` の仕様に基づく、犬の食事・水分管理PWAです。IndexedDBへ端末保存し、設定後はSupabaseを介して家族間で同期します。
 
 ## 起動方法
 
@@ -23,6 +23,18 @@ python3 -m http.server 4173
 - 栄養値・目標・時間枠などの設定スナップショット
 - JSONバックアップ／取込み、日次・明細CSV、全データ消去
 - PWAインストール案内とオフラインキャッシュ
+- 匿名認証と招待URLによる家族間同期、オフライン再送、同時操作の競合警告
+
+## 家族間同期のセットアップ
+
+1. Supabase DashboardのSQL Editorで [`supabase/migrations/202608290001_family_sync.sql`](./supabase/migrations/202608290001_family_sync.sql) を実行する。
+2. `main` ブランチへ変更をpushし、GitHub Pagesの再デプロイを待つ。
+3. 公開URLを最初の端末で開き、「設定」→「この端末のデータで家族同期を開始」を押す。
+4. 表示された招待URLを家族へ送る。
+
+Project URLとpublishable keyはブラウザ公開用設定として `js/supabase-config.js` に入っています。Database password、secret key、`service_role` key、招待URLはGitHubへ保存しないでください。
+
+ブラウザ用Supabaseクライアントは、オフライン起動と再現性のため `vendor/` にバージョン固定して同梱しています。
 
 ## テスト
 

@@ -2,6 +2,7 @@ const DB_NAME = "benu-care-meal-planner";
 const DB_VERSION = 1;
 const STORE = "app";
 const KEY = "state";
+const SYNC_KEY = "sync-metadata";
 
 function openDatabase() {
   return new Promise((resolve, reject) => {
@@ -44,5 +45,26 @@ export async function clearState() {
     transaction.objectStore(STORE).delete(KEY);
     transaction.oncomplete = () => { db.close(); resolve(); };
     transaction.onerror = () => { db.close(); reject(transaction.error || new Error("削除できません")); };
+  });
+}
+
+export async function loadSyncMetadata() {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(STORE, "readonly");
+    const request = transaction.objectStore(STORE).get(SYNC_KEY);
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error || new Error("同期情報を読み込めません"));
+    transaction.oncomplete = () => db.close();
+  });
+}
+
+export async function saveSyncMetadata(metadata) {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(STORE, "readwrite");
+    transaction.objectStore(STORE).put(metadata, SYNC_KEY);
+    transaction.oncomplete = () => { db.close(); resolve(); };
+    transaction.onerror = () => { db.close(); reject(transaction.error || new Error("同期情報を保存できません")); };
   });
 }

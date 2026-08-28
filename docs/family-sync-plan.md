@@ -1,6 +1,6 @@
 # 家族間同期・公開手順
 
-更新日: 2026-08-28
+更新日: 2026-08-29
 
 ## 決定した構成
 
@@ -41,23 +41,23 @@ DBのSQL、RLS、招待トークン生成、同期コードはその次の実装
 
 ### あなたが行うこと
 
-- [ ] GitHubでpublicリポジトリを作る
-- [ ] ローカルファイルを最初にpushする
-- [ ] GitHub Pagesを有効にする
-- [ ] Supabaseプロジェクトを作る
-- [ ] Project URLとpublishable keyをCodexへ伝える
+- [x] GitHubでpublicリポジトリを作る
+- [x] ローカルファイルを最初にpushする
+- [x] GitHub Pagesを有効にする
+- [x] Supabaseプロジェクトを作る
+- [x] Project URLとpublishable keyをCodexへ伝える
 - [ ] 完成後、招待URLを家族へ送る
 - [ ] 2台以上の端末で同期を確認する
 
 ### Codexが行うこと
 
-- [ ] GitHub Pages向けの公開設定を追加する
-- [ ] Supabaseのテーブル、関数、RLSをSQL migrationとして作る
-- [ ] 匿名サインインと招待URL参加処理を実装する
-- [ ] IndexedDBのデータをSupabaseへ同期する
-- [ ] Realtime更新を画面へ反映する
-- [ ] オフライン送信、二重記録、編集競合を実装・テストする
-- [ ] 既存ローカルデータの初回アップロード画面を作る
+- [x] GitHub Pages向けの公開設定を追加する
+- [x] Supabaseのテーブル、関数、RLSをSQL migrationとして作る
+- [x] 匿名サインインと招待URL参加処理を実装する
+- [x] IndexedDBのデータをSupabaseへ同期する
+- [x] Realtime更新を画面へ反映する
+- [x] オフライン送信、二重記録、編集競合を実装・テストする
+- [x] 既存ローカルデータの初回アップロード画面を作る
 
 ## 手順1: GitHubリポジトリを作る
 
@@ -179,18 +179,37 @@ js/auth.js              匿名サインイン・招待参加
 
 ## 手順7: DBと招待URLを作る
 
-同期実装で次のテーブルを作る。
+ここからが現在行う作業である。順番に次を行う。
+
+1. Supabase Dashboardで作成済みの `dogcalplan` プロジェクトを開く。
+2. 左側の `SQL Editor` を開き、`New query` を押す。
+3. [`../supabase/migrations/202608290001_family_sync.sql`](../supabase/migrations/202608290001_family_sync.sql) の内容をすべて貼り付ける。
+4. `Run` を1回押し、エラーが出ないことを確認する。同じSQLは再実行してもよい。
+5. 次のコマンドで今回の変更をGitHubへ送る。
+
+```bash
+cd /home/kgmrn/projects/dogcalplan
+git add .
+git commit -m "Add Supabase family sync"
+git push
+```
+
+6. GitHubの `Actions` でデプロイ完了を待つ。
+7. [公開中のアプリ](https://yoshiominemura.github.io/dogcalplan/) を最初の端末で開く。ホーム画面版を開いている場合は、一度ブラウザで開いて最新版へ更新する。
+8. 「設定」→「この端末のデータで家族同期を開始」を押す。現在の端末内データが最初の家族データになる。
+9. 表示された「家族へ送る招待URL」をコピーし、家族へ個別に送る。
+10. 家族は招待URLをそのまま開く。参加後はURLの `#invite=...` がアドレス欄から自動的に消える。
+
+DBには次の4種類を作成する。
 
 - `households`: 家族グループ
 - `household_members`: 匿名ユーザーと家族グループの対応
 - `household_invites`: 招待トークンのハッシュと有効状態
-- `dogs`: 犬と現在設定
-- `day_records`: 管理日と設定スナップショット
-- `schedule_slots`: 通常枠、調整枠、スキップ、失敗
-- `intake_events`: 食事・薬の実績と取消し
-- `plan_revisions`: 予定変更履歴
+- `household_states`: アプリ全体の正本と更新番号
 
-最初の招待トークンは十分に長いランダム値として1回生成する。DBにはハッシュだけを保存し、平文は家族へ送る招待URLにだけ使う。
+食事、薬、日別記録、予定変更履歴は `household_states.state` のJSON内に、既存バックアップと同じ構造で保存する。家族全体を1トランザクションで更新するため、途中までしか保存されない状態を避けられる。更新番号が一致しない同時操作はクライアントでマージし、二重投薬等は1件を取消し履歴にして画面へ警告する。
+
+最初の招待トークンは、同期開始ボタンを押したブラウザが暗号学的乱数として1回生成する。DBにはハッシュだけを保存し、平文は家族へ送る招待URLと最初の端末内にだけ残す。
 
 RLSでは、現在の匿名ユーザーが `household_members` に存在する家族データだけを読み書きできるようにする。単純な未認証 `anon` アクセスは許可しない。
 
@@ -245,10 +264,12 @@ Supabase Freeは1週間の非アクティブで停止する可能性があり、
 - [x] オフラインキャッシュ
 - [x] 06:00・12:00固定の薬予定
 - [x] 同期・公開方式の決定
-- [ ] GitHubリポジトリ作成
-- [ ] GitHub Pages公開
-- [ ] Supabaseプロジェクト作成
-- [ ] Supabase同期実装
+- [x] GitHubリポジトリ作成
+- [x] GitHub Pages公開
+- [x] Supabaseプロジェクト作成
+- [x] Supabase同期実装（コード・migration）
+- [ ] Supabaseでmigrationを実行
+- [ ] 同期版をGitHubへpush
 - [ ] 複数端末テスト
 - [ ] 家族へ共有
 

@@ -1,8 +1,9 @@
-const CACHE_NAME = "benu-care-v3";
+const CACHE_NAME = "benu-care-v4";
 const APP_SHELL = [
   "./", "./index.html", "./styles.css", "./manifest.webmanifest", "./icons/icon.svg",
   "./icons/icon-192.png", "./icons/icon-512.png", "./icons/icon-maskable.svg", "./icons/apple-touch-icon.png",
-  "./js/app.js", "./js/db.js", "./js/defaults.js", "./js/domain.js"
+  "./js/app.js", "./js/db.js", "./js/defaults.js", "./js/domain.js", "./js/auth.js",
+  "./js/sync.js", "./js/supabase-client.js", "./js/supabase-config.js", "./vendor/supabase.min.js"
 ];
 
 self.addEventListener("install", (event) => {

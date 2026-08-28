@@ -1,5 +1,7 @@
 import { clone, createDay, createEvent, recalculatePlan, selectEvenly, summarizeDay } from "./domain.js";
 import { DEFAULT_SETTINGS } from "./defaults.js";
+import { mergeFamilyStates } from "./sync.js";
+import { getSupabaseClient } from "./supabase-client.js";
 
 const resultNode = document.querySelector("#test-results");
 const summaryNode = document.querySelector("#test-summary");
@@ -86,6 +88,71 @@ function check(name, actual, expected) {
   check("境界値 残り22 mlでは0セット", recalculatePlan(d, morning).recommendedRemainingSets, 0);
   d.settingsSnapshot.waterLimitMl = 33; // 予約10 + 残り23
   check("境界値 残り23 mlでは1セット", recalculatePlan(d, morning).recommendedRemainingSets, 1);
+}
+
+{
+  const remote = { schemaVersion: 2, settings: clone(DEFAULT_SETTINGS), days: [day()], updatedAt: "2026-08-29T00:00:00.000Z" };
+  const local = clone(remote);
+  const remoteDay = remote.days[0];
+  const localDay = local.days[0];
+  remoteDay.events.push(createEvent(remoteDay, "CHICKEN_MEAL", "2026-08-28T00:00:00.000Z"));
+  localDay.events.push(createEvent(localDay, "SOUP_SYRINGE", "2026-08-28T01:00:00.000Z"));
+  const merged = mergeFamilyStates(remote, local);
+  check("同期: 別端末の異なる実績を両方残す", merged.state.days[0].events.map((event) => event.type).sort(), ["CHICKEN_MEAL", "SOUP_SYRINGE"]);
+}
+
+{
+  const remoteDay = day();
+  const localDay = clone(remoteDay);
+  localDay.id = "day_local";
+  localDay.slots.forEach((slot) => { slot.id = `local_${slot.id}`; slot.dayId = localDay.id; });
+  const remoteDose = createEvent(remoteDay, "VOMIT_BUSTER", "2026-08-28T00:00:00.000Z");
+  remoteDose.medicineScheduledTime = "06:00";
+  const localDose = createEvent(localDay, "VOMIT_BUSTER", "2026-08-28T00:01:00.000Z");
+  localDose.medicineScheduledTime = "06:00";
+  remoteDay.events.push(remoteDose);
+  localDay.events.push(localDose);
+  const remote = { schemaVersion: 2, settings: clone(DEFAULT_SETTINGS), days: [remoteDay], updatedAt: "2026-08-29T00:00:00.000Z" };
+  const local = { schemaVersion: 2, settings: clone(DEFAULT_SETTINGS), days: [localDay], updatedAt: "2026-08-29T00:01:00.000Z" };
+  const merged = mergeFamilyStates(remote, local);
+  const doses = merged.state.days[0].events.filter((event) => event.type === "VOMIT_BUSTER");
+  check("同期: 同じ06:00薬は有効1件だけ", doses.filter((event) => event.status === "ACTIVE").length, 1);
+  check("同期: 二重薬を消さず取消し履歴として残す", doses.filter((event) => event.status === "VOIDED").length, 1);
+  check("同期: 二重薬の競合警告を返す", merged.conflicts.some((message) => message.includes("06:00の薬")), true);
+}
+
+{
+  const remoteDay = day();
+  const localDay = clone(remoteDay);
+  localDay.id = "day_local";
+  const remoteFirst = remoteDay.slots[0];
+  localDay.slots.forEach((slot) => { slot.id = `local_${slot.id}`; slot.dayId = localDay.id; });
+  const localEvent = createEvent(localDay, "NORMAL_SET", "2026-08-28T00:00:00.000Z", { linkedSlotId: localDay.slots[0].id });
+  localDay.events.push(localEvent);
+  const merged = mergeFamilyStates(
+    { schemaVersion: 2, settings: clone(DEFAULT_SETTINGS), days: [remoteDay], updatedAt: "2026-08-29T00:00:00.000Z" },
+    { schemaVersion: 2, settings: clone(DEFAULT_SETTINGS), days: [localDay], updatedAt: "2026-08-29T00:01:00.000Z" }
+  );
+  check("同期: 別端末の枠IDをサーバー側IDへ付け替える", merged.state.days[0].events[0].linkedSlotId, remoteFirst.id);
+}
+
+try {
+  const client = await getSupabaseClient();
+  check("同期: 同梱Supabaseクライアントを初期化できる", Boolean(client?.auth?.signInAnonymously && client?.rpc && client?.channel), true);
+} catch (error) {
+  check("同期: 同梱Supabaseクライアントを初期化できる", error.message, true);
+}
+
+{
+  const base = { schemaVersion: 2, settings: clone(DEFAULT_SETTINGS), days: [], updatedAt: "2026-08-29T00:00:00.000Z" };
+  const remote = clone(base);
+  const local = clone(base);
+  remote.settings.dogName = "リモート";
+  remote.updatedAt = "2026-08-29T00:01:00.000Z";
+  local.settings.dogName = "ローカル";
+  local.updatedAt = "2026-08-29T00:02:00.000Z";
+  const merged = mergeFamilyStates(remote, local, base);
+  check("同期: 同時に設定編集した場合は警告して新しい更新を採用", [merged.state.settings.dogName, merged.conflicts.some((message) => message.includes("設定"))], ["ローカル", true]);
 }
 
 {

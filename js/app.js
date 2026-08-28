@@ -4,6 +4,7 @@ import {
   localDateInTimezone, medicineSchedule, recalculatePlan, reasonForType, summarizeDay, timeInTimezone, uid
 } from "./domain.js";
 import { clearState, loadState, saveState } from "./db.js";
+import { createFamilySync } from "./sync.js";
 
 const todayView = document.querySelector("#today-view");
 const historyView = document.querySelector("#history-view");
@@ -23,6 +24,8 @@ let undoAction = null;
 let mutationLocked = false;
 let volatileMode = false;
 let installPromptEvent = null;
+let familySync = null;
+let syncView = { phase: "local", message: "端末内に保存済み", error: false, connected: false, pending: false, conflicts: [], inviteUrl: "" };
 
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault();
@@ -78,6 +81,33 @@ function installHelpHtml() {
   return `<div class="alert info install-help"><span class="alert-icon" aria-hidden="true">＋</span><div><strong>ホーム画面に追加</strong><p>${message}</p><div class="slot-actions">${installPromptEvent ? '<button type="button" class="mini-btn give" data-action="install-app">追加する</button>' : ""}<button type="button" class="mini-btn" data-action="dismiss-install">閉じる</button></div></div></div>`;
 }
 
+function syncAlertsHtml() {
+  const alerts = [];
+  if (syncView.conflicts?.length) alerts.push(alertHtml({
+    level: "critical",
+    title: "家族間の同時操作を調整しました",
+    message: syncView.conflicts[0]
+  }));
+  if (syncView.connected && syncView.pending && !navigator.onLine) alerts.push(alertHtml({
+    level: "caution",
+    title: "オフライン・同期待ち",
+    message: "記録はこの端末に保存済みです。通信が戻ると家族へ自動送信します。"
+  }));
+  return alerts.join("");
+}
+
+function syncSettingsHtml() {
+  const connected = syncView.connected;
+  const statusClass = syncView.error ? "critical" : connected ? "info" : "caution";
+  const invite = syncView.inviteUrl;
+  return `<div class="section-heading"><h3>家族間同期</h3><span>${connected ? "Supabase" : "端末内のみ"}</span></div>
+    <section class="settings-section sync-panel">
+      <div class="alert ${statusClass}"><span class="alert-icon" aria-hidden="true">${syncView.error ? "!" : connected ? "✓" : "i"}</span><div><strong>${escapeHtml(syncView.message)}</strong><p>${connected ? "記録は端末にも保存され、オンライン時に家族へ同期されます。" : "家族と共有するには、最初の1台で同期を開始してください。"}</p></div></div>
+      ${connected ? `<div class="button-row"><button type="button" class="button" data-action="sync-now">今すぐ同期</button>${syncView.conflicts?.length ? '<button type="button" class="button" data-action="clear-sync-conflicts">警告を確認済みにする</button>' : ""}</div>` : '<div class="button-row"><button type="button" class="button primary" data-action="start-family-sync">この端末のデータで家族同期を開始</button></div>'}
+      ${invite ? `<div class="field full invite-field"><label for="family-invite-url">家族へ送る招待URL</label><textarea id="family-invite-url" readonly rows="3">${escapeHtml(invite)}</textarea><span class="field-help">このURLを知っている人は家族データへ参加できます。SNSや公開Issueには貼らないでください。</span><button type="button" class="button" data-action="copy-invite">招待URLをコピー</button></div>` : connected ? '<p class="field-help">この端末には招待トークンが残っていません。最初に同期を開始した端末から招待URLを共有してください。</p>' : ""}
+    </section>`;
+}
+
 function getNextPlan(day) {
   return day.slots
     .filter((slot) => slot.status === "PLANNED")
@@ -95,7 +125,8 @@ async function persist() {
   setSaveStatus("保存中…");
   try {
     await saveState(state);
-    setSaveStatus("端末内に保存済み");
+    setSaveStatus(familySync?.isConnected() ? "端末保存・同期待ち" : "端末内に保存済み");
+    await familySync?.queue();
   } catch (error) {
     volatileMode = true;
     setSaveStatus("保存できません", true);
@@ -171,7 +202,7 @@ function renderToday() {
       <strong class="next-time">${next ? next.scheduledTime : "—"}</strong>
       <div><strong>${next ? escapeHtml(settings.foods.normalSet.name) : "追加不要"}</strong><p>${next ? `${formatKcal(settings.foods.normalSet.caloriesTenthKcal)} kcal・管理水分 ${settings.foods.normalSet.countedWaterMl} ml` : summary.calorieReachable ? "現在の予定で目標に到達します" : "安全な追加予定はありません"}</p></div>
     </section>
-    <div class="alerts">${summary.warnings.map(alertHtml).join("")}${installHelpHtml()}</div>
+    <div class="alerts">${syncAlertsHtml()}${summary.warnings.map(alertHtml).join("")}${installHelpHtml()}</div>
 
     <div class="section-heading"><h3>すぐに記録</h3><span>確認後に保存</span></div>
     <div class="quick-grid">
@@ -276,7 +307,7 @@ function renderHistory() {
   }
   const days = [...state.days].sort((a, b) => b.localDate.localeCompare(a.localDate));
   historyView.innerHTML = `
-    <div class="page-heading"><div><h2 id="history-title">日別履歴</h2><p>すべて端末内に保存されています</p></div></div>
+    <div class="page-heading"><div><h2 id="history-title">日別履歴</h2><p>${syncView.connected ? "端末保存と家族同期を併用しています" : "すべて端末内に保存されています"}</p></div></div>
     <div class="history-list">${days.length ? days.map((day) => {
       const summary = summarizeDay(day);
       const hasWarning = summary.projectedCommittedWaterMl > day.settingsSnapshot.waterLimitMl;
@@ -364,6 +395,7 @@ function renderSettings() {
       <div class="button-row"><button type="submit" class="button" value="future">明日以降に適用</button><button type="submit" class="button primary" value="today">今日にも適用</button></div>
     </form>
 
+    ${syncSettingsHtml()}
     <div class="section-heading"><h3>データ管理</h3></div>
     <section class="settings-section">
       <div class="data-actions">
@@ -372,7 +404,7 @@ function renderSettings() {
         <button type="button" class="button" data-export="summary-csv">日次CSV</button>
         <button type="button" class="button" data-export="events-csv">明細CSV</button>
       </div>
-      <div class="button-row"><button type="button" class="button ghost-danger" data-action="clear-data">全データを消去</button></div>
+      <div class="button-row"><button type="button" class="button ghost-danger" data-action="clear-data">${syncView.connected ? "この端末を家族データから再読込み" : "全データを消去"}</button></div>
     </section>`;
 }
 
@@ -632,6 +664,10 @@ document.addEventListener("click", (event) => {
     case "save-history-note": saveNote(target.dataset.dayId, "#history-day-note"); break;
     case "undo": if (undoAction) { const action = undoAction; undoAction = null; toast.hidden = true; withMutationLock(action); } break;
     case "clear-data": clearAllData(); break;
+    case "start-family-sync": startFamilySync(); break;
+    case "copy-invite": copyInviteUrl(); break;
+    case "sync-now": familySync?.flush().then(() => familySync.pull()); break;
+    case "clear-sync-conflicts": familySync?.clearConflicts(); break;
     case "install-app": installApp(); break;
     case "dismiss-install":
       try { localStorage.setItem("dogcare-install-help-dismissed", "1"); } catch { /* no-op */ }
@@ -760,6 +796,18 @@ async function importJson(file) {
 }
 
 async function clearAllData() {
+  if (familySync?.isConnected()) {
+    const reload = window.confirm("この端末の内容を破棄し、家族データの最新版を再読込みします。Supabase上の家族データは削除されません。続けますか？");
+    if (!reload) return;
+    try {
+      await familySync.reloadFromCloud();
+      selectedHistoryDayId = null;
+      showToast("家族データから再読込みしました");
+    } catch (error) {
+      showToast(error.message || "再読込みできませんでした");
+    }
+    return;
+  }
   const answer = window.prompt("全記録を消去します。確認のため「全削除」と入力してください。");
   if (answer !== "全削除") {
     if (answer !== null) showToast("入力が一致しないため消去しませんでした");
@@ -774,6 +822,30 @@ async function clearAllData() {
     showToast("すべてのデータを消去しました。元に戻せません。");
   } catch (error) {
     showToast("データを消去できませんでした");
+  }
+}
+
+async function startFamilySync() {
+  const confirmed = window.confirm("この端末の現在の記録を、家族で共有する最初のデータとして登録します。続けますか？");
+  if (!confirmed) return;
+  try {
+    const inviteUrl = await familySync.startFamily();
+    renderSettings();
+    showToast("家族同期を開始しました。次に招待URLを家族へ送ってください。");
+    if (inviteUrl && navigator.clipboard?.writeText) await navigator.clipboard.writeText(inviteUrl).catch(() => {});
+  } catch (error) {
+    showToast(error.message || "家族同期を開始できませんでした");
+  }
+}
+
+async function copyInviteUrl() {
+  const inviteUrl = familySync?.getSnapshot().inviteUrl;
+  if (!inviteUrl) return;
+  try {
+    await navigator.clipboard.writeText(inviteUrl);
+    showToast("招待URLをコピーしました");
+  } catch {
+    window.prompt("この招待URLをコピーしてください", inviteUrl);
   }
 }
 
@@ -830,8 +902,26 @@ async function init() {
     console.error(error);
   }
   ensureToday();
+  familySync = createFamilySync({
+    getState: () => state,
+    applyState: async (nextState) => {
+      state = normalizeLoadedState(nextState);
+      ensureToday();
+      await saveState(state);
+      selectedHistoryDayId = null;
+      renderApp();
+    },
+    onStatus: (nextStatus) => {
+      syncView = nextStatus;
+      setSaveStatus(nextStatus.message, nextStatus.error);
+      if (state && route === "settings") renderSettings();
+      if (state && route === "today") renderToday();
+    },
+    onConflict: (message) => showToast(message)
+  });
   renderApp();
-  persist();
+  await persist();
+  familySync.initialize();
   if ("serviceWorker" in navigator && location.protocol !== "file:") {
     navigator.serviceWorker.register("./sw.js").catch((error) => console.warn("Service Worker registration failed", error));
   }
@@ -840,6 +930,7 @@ async function init() {
       ensureToday();
       renderToday();
       persist();
+      familySync.pull();
     }
   });
 }
