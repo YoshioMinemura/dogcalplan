@@ -1,0 +1,24 @@
+# Dependencies and generated output
+node_modules/
+_site/
+
+# Local environment and service configuration
+.env
+.env.*
+!.env.example
+.vercel/
+.supabase/
+js/supabase-config.local.js
+
+# Local exports and backups
+*backup*.json
+inu-care-*.json
+inu-care-*.csv
+benu-care-*.json
+benu-care-*.csv
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
