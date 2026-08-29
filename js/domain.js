@@ -38,13 +38,67 @@ export function createInitialState() {
   };
 }
 
+export function migrateSettingsToCurrent(settings) {
+  if (!settings) return settings;
+  settings.foods ||= {};
+  if (!settings.foods.balanceLiquid) {
+    const old = settings.foods.normalSet || {};
+    const amountMl = Number.isFinite(old.balanceLiquidMl) ? old.balanceLiquidMl : 18;
+    settings.foods.balanceLiquid = {
+      name: "バランスリキッド",
+      amountMl,
+      caloriesTenthKcal: Number.isFinite(old.caloriesTenthKcal) ? old.caloriesTenthKcal : 240,
+      countedWaterMl: amountMl,
+      indivisible: true
+    };
+  }
+  settings.foods.balanceLiquid.name = "バランスリキッド";
+  const migratedAmountMl = Number.isFinite(settings.foods.balanceLiquid.amountMl)
+    ? settings.foods.balanceLiquid.amountMl
+    : settings.foods.balanceLiquid.countedWaterMl;
+  settings.foods.balanceLiquid.amountMl = Number.isFinite(migratedAmountMl) && migratedAmountMl > 0
+    ? migratedAmountMl
+    : 18;
+  settings.foods.balanceLiquid.countedWaterMl = settings.foods.balanceLiquid.amountMl;
+  settings.schemaVersion = SCHEMA_VERSION;
+  delete settings.foods.normalSet;
+  if (settings.medicine) {
+    settings.medicine.dosesPerDay = 2;
+    settings.medicine.scheduledTimes = ["06:00", "12:00"];
+    delete settings.medicine.optionalScheduledTimes;
+  }
+  return settings;
+}
+
+export function migrateStateToCurrent(loaded) {
+  loaded.schemaVersion = SCHEMA_VERSION;
+  migrateSettingsToCurrent(loaded.settings);
+  for (const day of loaded.days || []) {
+    migrateSettingsToCurrent(day.settingsSnapshot);
+    for (const slot of day.slots || []) {
+      if (slot.plannedType === "NORMAL_SET") slot.plannedType = "BALANCE_LIQUID";
+      if (slot.changeReason) slot.changeReason = slot.changeReason.replaceAll("通常セット", "バランスリキッド");
+    }
+    for (const event of day.events || []) {
+      if (event.type === "NORMAL_SET") {
+        event.type = "BALANCE_LIQUID";
+        event.legacyNormalSet = true;
+      }
+    }
+    for (const revision of day.planRevisions || []) {
+      if (revision.reason) revision.reason = revision.reason.replaceAll("通常セット", "バランスリキッド");
+    }
+  }
+  return loaded;
+}
+
 export function createDay(localDate, settings, now = new Date()) {
   const stamp = now.toISOString();
   const dayId = uid("day");
   const slots = [
     ...settings.regularSlotTimes.map((scheduledTime) => ({
       id: uid("slot"), dayId, scheduledTime, role: "REGULAR", status: "PLANNED",
-      plannedType: "NORMAL_SET", revision: 1, updatedAt: stamp
+      plannedType: "BALANCE_LIQUID", revision: 1, updatedAt: stamp
     })),
     {
       id: uid("slot"), dayId, scheduledTime: settings.adjustmentSlotTime,
@@ -67,9 +121,10 @@ export function createDay(localDate, settings, now = new Date()) {
 
 export function eventNutrition(type, settings) {
   switch (type) {
-    case "NORMAL_SET": return {
-      caloriesTenthKcal: settings.foods.normalSet.caloriesTenthKcal,
-      countedWaterMl: settings.foods.normalSet.countedWaterMl
+    case "NORMAL_SET":
+    case "BALANCE_LIQUID": return {
+      caloriesTenthKcal: settings.foods.balanceLiquid.caloriesTenthKcal,
+      countedWaterMl: settings.foods.balanceLiquid.countedWaterMl
     };
     case "CHICKEN_MEAL": return {
       caloriesTenthKcal: settings.foods.chickenMeal.caloriesTenthKcal,
@@ -83,6 +138,8 @@ export function eventNutrition(type, settings) {
       caloriesTenthKcal: settings.foods.soupSyringe.caloriesTenthKcal,
       countedWaterMl: settings.foods.soupSyringe.countedWaterMl
     };
+    case "PLAIN_WATER": return { caloriesTenthKcal: 0, countedWaterMl: 0 };
+    case "SOLID_FOOD": return { caloriesTenthKcal: 0, countedWaterMl: 0 };
     default: throw new Error(`Unknown event type: ${type}`);
   }
 }
@@ -90,6 +147,8 @@ export function eventNutrition(type, settings) {
 export function createEvent(day, type, occurredAt, options = {}) {
   const stamp = new Date().toISOString();
   const nutrition = eventNutrition(type, day.settingsSnapshot);
+  if (Number.isFinite(options.caloriesTenthKcal)) nutrition.caloriesTenthKcal = options.caloriesTenthKcal;
+  if (Number.isFinite(options.countedWaterMl)) nutrition.countedWaterMl = options.countedWaterMl;
   return {
     id: uid("event"), dayId: day.id, type, occurredAt,
     linkedSlotId: options.linkedSlotId || undefined,
@@ -109,11 +168,11 @@ export function summarizeDay(day) {
   const projectedCommittedWaterMl = actualWaterMl + reservedMedicineWaterMl;
   const safeRemainingWaterMl = settings.waterLimitMl - projectedCommittedWaterMl;
   const chickenMealCount = active.filter((event) => event.type === "CHICKEN_MEAL").length;
-  const completedNormalSets = active.filter((event) => event.type === "NORMAL_SET").length;
+  const completedBalanceLiquidDoses = active.filter((event) => ["BALANCE_LIQUID", "NORMAL_SET"].includes(event.type)).length;
   return {
     actualCaloriesTenthKcal, actualWaterMl, completedMedicineDoses,
     remainingMedicineDoses, reservedMedicineWaterMl, projectedCommittedWaterMl,
-    safeRemainingWaterMl, chickenMealCount, completedNormalSets
+    safeRemainingWaterMl, chickenMealCount, completedBalanceLiquidDoses
   };
 }
 
@@ -193,16 +252,16 @@ export function recalculatePlan(day, now = new Date(), reason = "再計算", rec
   const adjustmentAvailable = adjustment && !terminal.has(adjustment.status) && adjustment.status !== "COMPLETED" && isSlotFuture(day, adjustment, now);
 
   const remainingCalories = Math.max(0, settings.calorieTargetTenthKcal - summary.actualCaloriesTenthKcal);
-  const normalCalories = settings.foods.normalSet.caloriesTenthKcal;
-  const normalWater = settings.foods.normalSet.countedWaterMl;
-  const setsNeededForCalories = remainingCalories === 0 ? 0 : Math.ceil(remainingCalories / normalCalories);
-  const setsAllowedByWater = Math.max(0, Math.floor(summary.safeRemainingWaterMl / normalWater));
-  const setsAllowedBySlots = regularFuture.length + (adjustmentAvailable ? 1 : 0);
-  const recommendedRemainingSets = Math.min(setsNeededForCalories, setsAllowedByWater, setsAllowedBySlots);
+  const balanceCalories = settings.foods.balanceLiquid.caloriesTenthKcal;
+  const balanceWater = settings.foods.balanceLiquid.countedWaterMl;
+  const dosesNeededForCalories = remainingCalories === 0 ? 0 : Math.ceil(remainingCalories / balanceCalories);
+  const dosesAllowedByWater = Math.max(0, Math.floor(summary.safeRemainingWaterMl / balanceWater));
+  const dosesAllowedBySlots = regularFuture.length + (adjustmentAvailable ? 1 : 0);
+  const recommendedRemainingDoses = Math.min(dosesNeededForCalories, dosesAllowedByWater, dosesAllowedBySlots);
 
   let selected = [];
-  if (recommendedRemainingSets <= regularFuture.length) {
-    selected = selectEvenly(regularFuture, recommendedRemainingSets);
+  if (recommendedRemainingDoses <= regularFuture.length) {
+    selected = selectEvenly(regularFuture, recommendedRemainingDoses);
   } else {
     selected = [...regularFuture];
     if (adjustmentAvailable) selected.push(adjustment);
@@ -226,19 +285,19 @@ export function recalculatePlan(day, now = new Date(), reason = "再計算", rec
     day.planRevisions.push({ id: uid("revision"), occurredAt: stamp, reason, changes: changed });
   }
 
-  const predictedCaloriesTenthKcal = summary.actualCaloriesTenthKcal + recommendedRemainingSets * normalCalories;
-  const predictedWaterMl = summary.projectedCommittedWaterMl + recommendedRemainingSets * normalWater;
+  const predictedCaloriesTenthKcal = summary.actualCaloriesTenthKcal + recommendedRemainingDoses * balanceCalories;
+  const predictedWaterMl = summary.projectedCommittedWaterMl + recommendedRemainingDoses * balanceWater;
   const calorieReachable = predictedCaloriesTenthKcal >= settings.calorieTargetTenthKcal;
   const waterSafe = predictedWaterMl <= settings.waterLimitMl;
   const warnings = buildWarnings(day, {
-    ...summary, remainingCalories, setsNeededForCalories, setsAllowedByWater,
-    setsAllowedBySlots, recommendedRemainingSets, predictedCaloriesTenthKcal,
+    ...summary, remainingCalories, dosesNeededForCalories, dosesAllowedByWater,
+    dosesAllowedBySlots, recommendedRemainingDoses, predictedCaloriesTenthKcal,
     predictedWaterMl, calorieReachable, waterSafe
   }, now);
   day.updatedAt = stamp;
   return {
-    ...summary, remainingCalories, setsNeededForCalories, setsAllowedByWater,
-    setsAllowedBySlots, recommendedRemainingSets, predictedCaloriesTenthKcal,
+    ...summary, remainingCalories, dosesNeededForCalories, dosesAllowedByWater,
+    dosesAllowedBySlots, recommendedRemainingDoses, predictedCaloriesTenthKcal,
     predictedWaterMl, calorieReachable, waterSafe, warnings
   };
 }
@@ -252,13 +311,13 @@ export function buildWarnings(day, summary, now = new Date()) {
     warnings.push({ level: "info", title: "カロリー目標に到達", message: "本日のカロリー目標に到達しました。" });
   } else if (!summary.calorieReachable) {
     const shortage = s.calorieTargetTenthKcal - summary.predictedCaloriesTenthKcal;
-    const waterBlocked = summary.setsAllowedByWater < summary.setsNeededForCalories
-      && summary.setsAllowedByWater <= summary.setsAllowedBySlots;
+    const waterBlocked = summary.dosesAllowedByWater < summary.dosesNeededForCalories
+      && summary.dosesAllowedByWater <= summary.dosesAllowedBySlots;
     warnings.push({
       level: "info",
       title: "目標まで届かない見込みです",
       message: waterBlocked
-        ? `見込みは ${formatKcal(summary.predictedCaloriesTenthKcal)} kcal。目標まで ${formatKcal(shortage)} kcalですが、水分上限のため通常セットを追加しません。`
+        ? `見込みは ${formatKcal(summary.predictedCaloriesTenthKcal)} kcal。目標まで ${formatKcal(shortage)} kcalですが、水分上限のためバランスリキッドを追加しません。`
         : `見込みは ${formatKcal(summary.predictedCaloriesTenthKcal)} kcal。残り時間枠では目標に到達できません。`
     });
   }
@@ -289,5 +348,5 @@ export function formatDateJa(localDate, includeYear = false) {
 }
 
 export function reasonForType(type) {
-  return ({ NORMAL_SET: "通常セット完了", CHICKEN_MEAL: "鶏ごはん摂取", VOMIT_BUSTER: "薬記録", SOUP_SYRINGE: "スープ缶記録" })[type] || "実績編集";
+  return ({ BALANCE_LIQUID: "バランスリキッド完了", PLAIN_WATER: "飲水記録", SOLID_FOOD: "固形食摂取", CHICKEN_MEAL: "鶏ごはん摂取", VOMIT_BUSTER: "薬記録", SOUP_SYRINGE: "スープ缶記録" })[type] || "実績編集";
 }

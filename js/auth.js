@@ -3,9 +3,17 @@ export function inviteTokenFromLocation(locationObject = globalThis.location) {
   return new URLSearchParams(hash).get("invite") || "";
 }
 
-export function clearInviteFromAddress() {
-  if (!globalThis.history?.replaceState || !globalThis.location) return;
-  history.replaceState(null, "", `${location.pathname}${location.search}`);
+export function inviteTokenFromInput(value) {
+  const input = String(value || "").trim();
+  if (!input) throw new Error("招待URLを貼り付けてください");
+  try {
+    const url = new URL(input, globalThis.location?.href || "https://example.invalid/");
+    const hash = url.hash.startsWith("#") ? url.hash.slice(1) : "";
+    const token = new URLSearchParams(hash).get("invite") || url.searchParams.get("invite");
+    if (token) return token;
+  } catch { /* raw tokenとして確認する */ }
+  if (/^[A-Za-z0-9_-]{43,}$/.test(input)) return input;
+  throw new Error("招待URLが正しくありません。#invite=…を含む完全なURLを貼り付けてください");
 }
 
 export async function ensureAnonymousSession(client) {
@@ -54,4 +62,3 @@ export async function createHousehold(client, initialState, name = "べぬ家族
   if (!created?.household_id) throw new Error("家族データを作成できません");
   return { ...created, token };
 }
-

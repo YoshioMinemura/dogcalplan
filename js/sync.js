@@ -1,4 +1,4 @@
-import { clearInviteFromAddress, createHousehold, findCurrentHousehold, inviteTokenFromLocation, joinWithInvite } from "./auth.js";
+import { createHousehold, findCurrentHousehold, inviteTokenFromInput, inviteTokenFromLocation, joinWithInvite } from "./auth.js";
 import { loadSyncMetadata, saveSyncMetadata } from "./db.js";
 import { getSupabaseClient } from "./supabase-client.js";
 
@@ -48,7 +48,7 @@ function resolveDuplicateEvents(day, remoteEventIds, conflicts) {
   const groups = new Map();
   for (const event of active) {
     let key = null;
-    if (event.type === "NORMAL_SET" && event.linkedSlotId) key = `slot:${event.linkedSlotId}`;
+    if (["BALANCE_LIQUID", "NORMAL_SET"].includes(event.type) && event.linkedSlotId) key = `slot:${event.linkedSlotId}`;
     if (event.type === "VOMIT_BUSTER" && event.medicineScheduledTime) key = `medicine:${event.medicineScheduledTime}`;
     if (!key) continue;
     const list = groups.get(key) || [];
@@ -67,7 +67,7 @@ function resolveDuplicateEvents(day, remoteEventIds, conflicts) {
       duplicate.voidReason = "同期競合: 別端末で同じ予定を記録済み";
       duplicate.updatedAt = new Date(Math.max(entityTime(duplicate), entityTime(kept))).toISOString();
     }
-    const target = key.startsWith("medicine:") ? `${key.slice(9)}の薬` : "同じ通常枠";
+    const target = key.startsWith("medicine:") ? `${key.slice(9)}の薬` : "同じバランスリキッド枠";
     conflicts.push(`${target}が別端末でも記録されていたため、先に同期された1件だけを有効にしました。`);
   }
 }
@@ -345,7 +345,6 @@ export function createFamilySync({ getState, applyState, onStatus, onConflict })
         metadata.lastSyncedState = null;
         metadata.conflicts = [];
         metadata.inviteToken = inviteToken;
-        clearInviteFromAddress();
       } else {
         household = await findCurrentHousehold(client);
       }
@@ -358,6 +357,25 @@ export function createFamilySync({ getState, applyState, onStatus, onConflict })
       await connect(household);
     } catch (error) {
       emit("error", friendlyError(error), true);
+    }
+  }
+
+  async function joinFamily(inviteValue) {
+    try {
+      if (!navigator.onLine) throw new Error("家族への参加はオンラインで行ってください");
+      const token = inviteTokenFromInput(inviteValue);
+      emit("connecting", "家族データへ参加中…");
+      client ||= await getSupabaseClient();
+      const household = await joinWithInvite(client, token);
+      metadata.lastSyncedState = null;
+      metadata.conflicts = [];
+      metadata.inviteToken = token;
+      metadata.pending = false;
+      await connect(household);
+    } catch (error) {
+      const message = friendlyError(error);
+      emit("local", message, true);
+      throw new Error(message);
     }
   }
 
@@ -414,6 +432,7 @@ export function createFamilySync({ getState, applyState, onStatus, onConflict })
 
   return {
     initialize,
+    joinFamily,
     queue,
     pull,
     flush,

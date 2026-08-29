@@ -98,6 +98,8 @@ h1, h2, h3, p { margin-top: 0; }
 .quick-action { min-height: 72px; border: 1px solid var(--line); border-radius: 15px; padding: .68rem; text-align: left; background: var(--surface); box-shadow: 0 2px 8px rgb(39 53 48 / 4%); cursor: pointer; }
 .quick-action.primary { grid-column: 1 / -1; color: #fff; border-color: var(--brand); background: var(--brand); }
 .quick-action.chicken { color: #75411f; border-color: #e8c39b; background: var(--accent-soft); }
+.quick-action.water { color: #245b7b; border-color: #b8d4e4; background: #eaf5fb; }
+.quick-action.solid { color: #654c24; border-color: #ddc99f; background: #f7f0df; }
 .quick-action strong, .quick-action small { display: block; }
 .quick-action strong { margin-bottom: .18rem; font-size: .9rem; }
 .quick-action small { color: inherit; opacity: .76; font-size: .69rem; }
@@ -126,6 +128,8 @@ h1, h2, h3, p { margin-top: 0; }
 .event-card.medicine .timeline-body, .slot-card.medicine .timeline-body { border-color: #b8cfdf; background: #edf5fa; }
 .slot-card.medicine.planned .timeline-body { box-shadow: inset 4px 0 #477a9a; }
 .event-card.soup .timeline-body { border-color: #d9c4d8; background: #f8f0f8; }
+.event-card.water .timeline-body { border-color: #b8d4e4; background: #edf7fb; }
+.event-card.solid .timeline-body { border-color: #ddc99f; background: #faf5e9; }
 .event-top { display: flex; align-items: start; justify-content: space-between; gap: .6rem; }
 .link-button { min-width: 44px; min-height: 36px; border: 0; border-radius: 8px; color: var(--brand); background: transparent; font-size: .72rem; font-weight: 800; cursor: pointer; }
 
@@ -170,6 +174,9 @@ h1, h2, h3, p { margin-top: 0; }
 .invite-field { display: grid; gap: .45rem; }
 .invite-field textarea { width: 100%; min-height: 78px; resize: none; border: 1px solid #c9cfca; border-radius: 10px; padding: .62rem .7rem; color: var(--ink); background: #fff; font-size: .72rem; overflow-wrap: anywhere; }
 .invite-field .button { justify-self: start; }
+.join-gate { display: grid; gap: .75rem; }
+.join-form { display: grid; gap: .8rem; margin-top: .2rem; }
+.join-form textarea { width: 100%; min-height: 92px; resize: vertical; border: 1px solid #c9cfca; border-radius: 10px; padding: .72rem; color: var(--ink); background: #fff; font-size: .8rem; overflow-wrap: anywhere; }
 
 .bottom-nav { position: fixed; z-index: 20; left: 50%; bottom: 0; display: grid; grid-template-columns: repeat(3, 1fr); width: min(100%, 760px); transform: translateX(-50%); padding: .35rem .75rem calc(.35rem + env(safe-area-inset-bottom)); border-top: 1px solid rgb(41 57 51 / 12%); background: rgb(255 253 248 / 94%); backdrop-filter: blur(16px); }
 .bottom-nav button { min-height: 56px; border: 0; border-radius: 12px; color: var(--muted); background: transparent; cursor: pointer; }

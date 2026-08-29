@@ -1,4 +1,4 @@
-const CACHE_NAME = "benu-care-v4";
+const CACHE_NAME = "benu-care-v5";
 const APP_SHELL = [
   "./", "./index.html", "./styles.css", "./manifest.webmanifest", "./icons/icon.svg",
   "./icons/icon-192.png", "./icons/icon-512.png", "./icons/icon-maskable.svg", "./icons/apple-touch-icon.png",

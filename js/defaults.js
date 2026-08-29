@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export const DEFAULT_SETTINGS = Object.freeze({
   schemaVersion: SCHEMA_VERSION,
@@ -7,12 +7,11 @@ export const DEFAULT_SETTINGS = Object.freeze({
   calorieTargetTenthKcal: 1980,
   waterLimitMl: 200,
   foods: {
-    normalSet: {
-      name: "通常セット",
-      balanceLiquidMl: 18,
-      addedWaterMl: 5,
+    balanceLiquid: {
+      name: "バランスリキッド",
+      amountMl: 18,
       caloriesTenthKcal: 240,
-      countedWaterMl: 23,
+      countedWaterMl: 18,
       indivisible: true
     },
     chickenMeal: {
@@ -39,7 +38,10 @@ export const DEFAULT_SETTINGS = Object.freeze({
 });
 
 export const EVENT_LABELS = {
-  NORMAL_SET: "通常セット",
+  BALANCE_LIQUID: "バランスリキッド",
+  NORMAL_SET: "バランスリキッド（旧記録）",
+  PLAIN_WATER: "普通の水",
+  SOLID_FOOD: "固形食",
   CHICKEN_MEAL: "鶏のスープごはん",
   VOMIT_BUSTER: "薬",
   SOUP_SYRINGE: "スープ缶シリンジ"

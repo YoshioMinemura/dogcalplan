@@ -1,7 +1,8 @@
-import { clone, createDay, createEvent, recalculatePlan, selectEvenly, summarizeDay } from "./domain.js";
+import { clone, createDay, createEvent, migrateStateToCurrent, recalculatePlan, selectEvenly, summarizeDay } from "./domain.js";
 import { DEFAULT_SETTINGS } from "./defaults.js";
 import { mergeFamilyStates } from "./sync.js";
 import { getSupabaseClient } from "./supabase-client.js";
+import { inviteTokenFromInput } from "./auth.js";
 
 const resultNode = document.querySelector("#test-results");
 const summaryNode = document.querySelector("#test-summary");
@@ -28,29 +29,29 @@ function check(name, actual, expected) {
 {
   const d = day();
   const s = recalculatePlan(d, morning);
-  check("T01 新規日は8セット、192 kcal、薬込み194 ml", [s.recommendedRemainingSets, s.predictedCaloriesTenthKcal, s.predictedWaterMl], [8, 1920, 194]);
-  check("T01 22時は通常予定にしない", d.slots.find((slot) => slot.role === "ADJUSTMENT").status, "ADJUSTMENT_AVAILABLE");
+  check("T01 新規日は9回、216 kcal、薬込み172 ml", [s.recommendedRemainingDoses, s.predictedCaloriesTenthKcal, s.predictedWaterMl], [9, 2160, 172]);
+  check("T01 22時も目標到達用に予定する", d.slots.find((slot) => slot.role === "ADJUSTMENT").status, "PLANNED");
 }
 
 [
-  [1, 7, 2079, 171], [2, 5, 1998, 125], [3, 4, 2157, 102], [4, 2, 2076, 56], [5, 0, 1995, 10]
+  [1, 7, 2079, 136], [2, 5, 1998, 100], [3, 4, 2157, 82], [4, 2, 2076, 46], [5, 0, 1995, 10]
 ].forEach(([chicken, sets, calories, water]) => {
   const d = day();
   add(d, "CHICKEN_MEAL", chicken);
   const s = recalculatePlan(d, morning);
-  check(`T04-T08 鶏ごはん${chicken}食`, [s.recommendedRemainingSets, s.predictedCaloriesTenthKcal, s.predictedWaterMl], [sets, calories, water]);
+  check(`T04-T08 鶏ごはん${chicken}食`, [s.recommendedRemainingDoses, s.predictedCaloriesTenthKcal, s.predictedWaterMl], [sets, calories, water]);
 });
 
 {
   const d = day();
   const completed = d.slots.slice(0, 3);
-  add(d, "NORMAL_SET", 3, completed);
+  add(d, "BALANCE_LIQUID", 3, completed);
   add(d, "CHICKEN_MEAL");
   const s1 = recalculatePlan(d, at11);
-  check("T09 3セット後に鶏1食で未来4セット", [s1.completedNormalSets, s1.recommendedRemainingSets], [3, 4]);
+  check("T09 バランスリキッド3回後に鶏1食で未来4回", [s1.completedBalanceLiquidDoses, s1.recommendedRemainingDoses], [3, 4]);
   add(d, "CHICKEN_MEAL");
   const s2 = recalculatePlan(d, at11);
-  check("T10 さらに鶏1食で未来2セット", [s2.completedNormalSets, s2.recommendedRemainingSets], [3, 2]);
+  check("T10 さらに鶏1食で未来2回", [s2.completedBalanceLiquidDoses, s2.recommendedRemainingDoses], [3, 2]);
 }
 
 {
@@ -83,15 +84,15 @@ function check(name, actual, expected) {
 
 {
   const settings = clone(DEFAULT_SETTINGS);
-  settings.waterLimitMl = 32; // 予約10 + 残り22
+  settings.waterLimitMl = 27; // 予約10 + 残り17
   const d = day(settings);
-  check("境界値 残り22 mlでは0セット", recalculatePlan(d, morning).recommendedRemainingSets, 0);
-  d.settingsSnapshot.waterLimitMl = 33; // 予約10 + 残り23
-  check("境界値 残り23 mlでは1セット", recalculatePlan(d, morning).recommendedRemainingSets, 1);
+  check("境界値 残り17 mlでは0回", recalculatePlan(d, morning).recommendedRemainingDoses, 0);
+  d.settingsSnapshot.waterLimitMl = 28; // 予約10 + 残り18
+  check("境界値 残り18 mlでは1回", recalculatePlan(d, morning).recommendedRemainingDoses, 1);
 }
 
 {
-  const remote = { schemaVersion: 2, settings: clone(DEFAULT_SETTINGS), days: [day()], updatedAt: "2026-08-29T00:00:00.000Z" };
+  const remote = { schemaVersion: 3, settings: clone(DEFAULT_SETTINGS), days: [day()], updatedAt: "2026-08-29T00:00:00.000Z" };
   const local = clone(remote);
   const remoteDay = remote.days[0];
   const localDay = local.days[0];
@@ -112,8 +113,8 @@ function check(name, actual, expected) {
   localDose.medicineScheduledTime = "06:00";
   remoteDay.events.push(remoteDose);
   localDay.events.push(localDose);
-  const remote = { schemaVersion: 2, settings: clone(DEFAULT_SETTINGS), days: [remoteDay], updatedAt: "2026-08-29T00:00:00.000Z" };
-  const local = { schemaVersion: 2, settings: clone(DEFAULT_SETTINGS), days: [localDay], updatedAt: "2026-08-29T00:01:00.000Z" };
+  const remote = { schemaVersion: 3, settings: clone(DEFAULT_SETTINGS), days: [remoteDay], updatedAt: "2026-08-29T00:00:00.000Z" };
+  const local = { schemaVersion: 3, settings: clone(DEFAULT_SETTINGS), days: [localDay], updatedAt: "2026-08-29T00:01:00.000Z" };
   const merged = mergeFamilyStates(remote, local);
   const doses = merged.state.days[0].events.filter((event) => event.type === "VOMIT_BUSTER");
   check("同期: 同じ06:00薬は有効1件だけ", doses.filter((event) => event.status === "ACTIVE").length, 1);
@@ -127,11 +128,11 @@ function check(name, actual, expected) {
   localDay.id = "day_local";
   const remoteFirst = remoteDay.slots[0];
   localDay.slots.forEach((slot) => { slot.id = `local_${slot.id}`; slot.dayId = localDay.id; });
-  const localEvent = createEvent(localDay, "NORMAL_SET", "2026-08-28T00:00:00.000Z", { linkedSlotId: localDay.slots[0].id });
+  const localEvent = createEvent(localDay, "BALANCE_LIQUID", "2026-08-28T00:00:00.000Z", { linkedSlotId: localDay.slots[0].id });
   localDay.events.push(localEvent);
   const merged = mergeFamilyStates(
-    { schemaVersion: 2, settings: clone(DEFAULT_SETTINGS), days: [remoteDay], updatedAt: "2026-08-29T00:00:00.000Z" },
-    { schemaVersion: 2, settings: clone(DEFAULT_SETTINGS), days: [localDay], updatedAt: "2026-08-29T00:01:00.000Z" }
+    { schemaVersion: 3, settings: clone(DEFAULT_SETTINGS), days: [remoteDay], updatedAt: "2026-08-29T00:00:00.000Z" },
+    { schemaVersion: 3, settings: clone(DEFAULT_SETTINGS), days: [localDay], updatedAt: "2026-08-29T00:01:00.000Z" }
   );
   check("同期: 別端末の枠IDをサーバー側IDへ付け替える", merged.state.days[0].events[0].linkedSlotId, remoteFirst.id);
 }
@@ -144,7 +145,7 @@ try {
 }
 
 {
-  const base = { schemaVersion: 2, settings: clone(DEFAULT_SETTINGS), days: [], updatedAt: "2026-08-29T00:00:00.000Z" };
+  const base = { schemaVersion: 3, settings: clone(DEFAULT_SETTINGS), days: [], updatedAt: "2026-08-29T00:00:00.000Z" };
   const remote = clone(base);
   const local = clone(base);
   remote.settings.dogName = "リモート";
@@ -153,6 +154,40 @@ try {
   local.updatedAt = "2026-08-29T00:02:00.000Z";
   const merged = mergeFamilyStates(remote, local, base);
   check("同期: 同時に設定編集した場合は警告して新しい更新を採用", [merged.state.settings.dogName, merged.conflicts.some((message) => message.includes("設定"))], ["ローカル", true]);
+}
+
+{
+  const d = day();
+  d.events.push(createEvent(d, "PLAIN_WATER", morning.toISOString(), { countedWaterMl: 50 }));
+  const s = recalculatePlan(d, morning);
+  check("普通の水50 mlは水分だけに加算", [s.actualCaloriesTenthKcal, s.actualWaterMl, s.recommendedRemainingDoses], [0, 50, 7]);
+}
+
+{
+  const d = day();
+  d.events.push(createEvent(d, "SOLID_FOOD", morning.toISOString(), { caloriesTenthKcal: 1000 }));
+  const s = recalculatePlan(d, morning);
+  check("固形食100 kcalはカロリーだけに加算", [s.actualCaloriesTenthKcal, s.actualWaterMl, s.recommendedRemainingDoses], [1000, 0, 5]);
+}
+
+{
+  const legacySettings = clone(DEFAULT_SETTINGS);
+  legacySettings.schemaVersion = 2;
+  legacySettings.foods.normalSet = { name: "通常セット", balanceLiquidMl: 18, addedWaterMl: 5, caloriesTenthKcal: 240, countedWaterMl: 23, indivisible: true };
+  delete legacySettings.foods.balanceLiquid;
+  const legacyDay = day();
+  legacyDay.settingsSnapshot = clone(legacySettings);
+  const legacyEvent = createEvent(day(), "BALANCE_LIQUID", morning.toISOString());
+  legacyEvent.type = "NORMAL_SET";
+  legacyEvent.countedWaterMl = 23;
+  legacyDay.events.push(legacyEvent);
+  const migrated = migrateStateToCurrent({ schemaVersion: 2, settings: legacySettings, days: [legacyDay], updatedAt: morning.toISOString() });
+  check("移行: 旧通常セットの実績23 mlを保持", [migrated.settings.foods.balanceLiquid.countedWaterMl, migrated.days[0].events[0].type, migrated.days[0].events[0].countedWaterMl], [18, "BALANCE_LIQUID", 23]);
+}
+
+{
+  const token = "a".repeat(64);
+  check("招待: 完全なURLとトークン単体を受け付ける", [inviteTokenFromInput(`https://example.com/app/#invite=${token}`), inviteTokenFromInput(token)], [token, token]);
 }
 
 {
@@ -167,10 +202,10 @@ try {
   const settings = clone(DEFAULT_SETTINGS);
   settings.calorieTargetTenthKcal = 240;
   let d = day(settings);
-  check("残り24.0 kcalは1セット", recalculatePlan(d, morning).recommendedRemainingSets, 1);
+  check("残り24.0 kcalは1回", recalculatePlan(d, morning).recommendedRemainingDoses, 1);
   settings.calorieTargetTenthKcal = 241;
   d = day(settings);
-  check("残り24.1 kcalは2セット", recalculatePlan(d, morning).recommendedRemainingSets, 2);
+  check("残り24.1 kcalは2回", recalculatePlan(d, morning).recommendedRemainingDoses, 2);
 }
 
 const passed = results.filter((result) => result.pass).length;

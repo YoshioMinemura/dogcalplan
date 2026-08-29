@@ -1,7 +1,7 @@
 import { DEFAULT_SETTINGS, EVENT_LABELS, STATUS_LABELS, SCHEMA_VERSION } from "./defaults.js";
 import {
   clone, createDay, createEvent, createInitialState, eventNutrition, formatDateJa, formatKcal,
-  localDateInTimezone, medicineSchedule, recalculatePlan, reasonForType, summarizeDay, timeInTimezone, uid
+  localDateInTimezone, medicineSchedule, migrateStateToCurrent, recalculatePlan, reasonForType, summarizeDay, timeInTimezone, uid
 } from "./domain.js";
 import { clearState, loadState, saveState } from "./db.js";
 import { createFamilySync } from "./sync.js";
@@ -25,7 +25,7 @@ let mutationLocked = false;
 let volatileMode = false;
 let installPromptEvent = null;
 let familySync = null;
-let syncView = { phase: "local", message: "端末内に保存済み", error: false, connected: false, pending: false, conflicts: [], inviteUrl: "" };
+let syncView = { phase: "initializing", message: "同期を確認中…", error: false, connected: false, pending: false, conflicts: [], inviteUrl: "" };
 
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault();
@@ -114,6 +114,30 @@ function getNextPlan(day) {
     .sort((a, b) => a.scheduledTime.localeCompare(b.scheduledTime))[0] || null;
 }
 
+function getBalanceRecordTarget(day) {
+  return day.slots
+    .filter((slot) => ["OVERDUE", "PLANNED"].includes(slot.status))
+    .sort((left, right) => {
+      const priority = Number(right.status === "OVERDUE") - Number(left.status === "OVERDUE");
+      return priority || left.scheduledTime.localeCompare(right.scheduledTime);
+    })[0] || null;
+}
+
+function joinFamilyHtml() {
+  return `<div class="join-gate">
+    <div class="page-heading"><div><h2 id="today-title">家族データに参加</h2><p>このホーム画面版では、初回だけ招待URLの貼り付けが必要です。</p></div></div>
+    <section class="settings-section">
+      <div class="alert caution"><span class="alert-icon" aria-hidden="true">i</span><div><strong>まだ家族と同期されていません</strong><p>メッセージ等で受け取った完全な招待URLを貼り付けてください。参加後は、次回からホーム画面のアイコンを押すだけで自動同期します。</p></div></div>
+      <form id="join-family-form" class="join-form">
+        <div class="field full"><label for="join-invite-url">招待URL</label><textarea id="join-invite-url" name="invite" rows="4" required autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://…/#invite=…"></textarea></div>
+        <div class="button-row"><button type="submit" class="button primary">家族データに参加</button></div>
+      </form>
+      <p class="field-help">参加が完了するまで、この端末から新しい記録は追加されません。</p>
+      <button type="button" class="link-button" data-route="settings">最初の家族データを作る場合は設定へ</button>
+    </section>
+  </div>`;
+}
+
 function setSaveStatus(message, error = false) {
   saveStatus.textContent = message;
   saveStatus.classList.toggle("error", error);
@@ -169,6 +193,12 @@ function renderApp() {
 }
 
 function renderToday() {
+  if (!syncView.connected) {
+    todayView.innerHTML = syncView.phase === "initializing"
+      ? '<div class="empty-state" role="status">家族データとの接続を確認しています…</div>'
+      : joinFamilyHtml();
+    return;
+  }
   const day = currentDay();
   const summary = recalculatePlan(day, new Date(), "時刻更新");
   const settings = day.settingsSnapshot;
@@ -176,7 +206,8 @@ function renderToday() {
   const actualKcal = formatKcal(summary.actualCaloriesTenthKcal);
   const targetKcal = formatKcal(settings.calorieTargetTenthKcal);
   const remaining = Math.max(0, settings.calorieTargetTenthKcal - summary.actualCaloriesTenthKcal);
-  const completedTotal = summary.completedNormalSets + summary.recommendedRemainingSets;
+  const completedTotal = summary.completedBalanceLiquidDoses + summary.recommendedRemainingDoses;
+  const recordTarget = getBalanceRecordTarget(day);
   const heroStatus = summary.actualCaloriesTenthKcal >= settings.calorieTargetTenthKcal
     ? `${formatKcal(summary.actualCaloriesTenthKcal - settings.calorieTargetTenthKcal)} kcal 超過`
     : `あと ${formatKcal(remaining)} kcal`;
@@ -196,17 +227,19 @@ function renderToday() {
       <div class="metric-card"><span class="metric-label">実績水分</span><strong class="metric-value">${summary.actualWaterMl} / ${settings.waterLimitMl} ml</strong><span class="metric-note">実際に摂取</span></div>
       <div class="metric-card"><span class="metric-label">薬を含む見込み</span><strong class="metric-value">${summary.projectedCommittedWaterMl} ml</strong><span class="metric-note">安全残量 ${summary.safeRemainingWaterMl} ml</span></div>
       <div class="metric-card"><span class="metric-label">鶏ごはん</span><strong class="metric-value">${summary.chickenMealCount} 食</strong><span class="metric-note">1食 ${formatKcal(settings.foods.chickenMeal.caloriesTenthKcal)} kcal</span></div>
-      <div class="metric-card"><span class="metric-label">通常セット</span><strong class="metric-value">${summary.completedNormalSets} 回完了</strong><span class="metric-note">必要合計 ${completedTotal} 回</span></div>
+      <div class="metric-card"><span class="metric-label">バランスリキッド</span><strong class="metric-value">${summary.completedBalanceLiquidDoses} 回完了</strong><span class="metric-note">必要合計 ${completedTotal} 回</span></div>
     </div>
     <section class="next-card" aria-label="次回予定">
       <strong class="next-time">${next ? next.scheduledTime : "—"}</strong>
-      <div><strong>${next ? escapeHtml(settings.foods.normalSet.name) : "追加不要"}</strong><p>${next ? `${formatKcal(settings.foods.normalSet.caloriesTenthKcal)} kcal・管理水分 ${settings.foods.normalSet.countedWaterMl} ml` : summary.calorieReachable ? "現在の予定で目標に到達します" : "安全な追加予定はありません"}</p></div>
+      <div><strong>${next ? escapeHtml(settings.foods.balanceLiquid.name) : "追加不要"}</strong><p>${next ? `${formatKcal(settings.foods.balanceLiquid.caloriesTenthKcal)} kcal・${settings.foods.balanceLiquid.amountMl} ml` : summary.calorieReachable ? "現在の予定で目標に到達します" : "安全な追加予定はありません"}</p></div>
     </section>
     <div class="alerts">${syncAlertsHtml()}${summary.warnings.map(alertHtml).join("")}${installHelpHtml()}</div>
 
-    <div class="section-heading"><h3>すぐに記録</h3><span>確認後に保存</span></div>
+    <div class="section-heading"><h3>すぐに記録</h3><span>入力後すぐ反映</span></div>
     <div class="quick-grid">
-      <button class="quick-action primary" type="button" data-record="NORMAL_SET"><strong>${escapeHtml(settings.foods.normalSet.name)}を与えた</strong><small>${formatKcal(settings.foods.normalSet.caloriesTenthKcal)} kcal・${settings.foods.normalSet.countedWaterMl} ml</small></button>
+      <button class="quick-action primary" type="button" data-action="record-balance"${recordTarget ? ` data-slot-id="${recordTarget.id}"` : ""}><strong>${escapeHtml(settings.foods.balanceLiquid.name)}を与えた</strong><small>${recordTarget ? `${recordTarget.scheduledTime}枠・` : "予定外・"}${formatKcal(settings.foods.balanceLiquid.caloriesTenthKcal)} kcal・${settings.foods.balanceLiquid.amountMl} ml</small></button>
+      <button class="quick-action water" type="button" data-record="PLAIN_WATER"><strong>普通の水を飲んだ</strong><small>飲水量だけ入力</small></button>
+      <button class="quick-action solid" type="button" data-record="SOLID_FOOD"><strong>固形食を食べた</strong><small>カロリーだけ入力</small></button>
       <button class="quick-action chicken" type="button" data-record="CHICKEN_MEAL"><strong>${escapeHtml(settings.foods.chickenMeal.name)}を食べた</strong><small>${formatKcal(settings.foods.chickenMeal.caloriesTenthKcal)} kcal・水分${settings.foods.chickenMeal.countedWaterMl} ml</small></button>
       <button class="quick-action" type="button" data-record="VOMIT_BUSTER"><strong>${escapeHtml(settings.medicine.name)} ${settings.medicine.doseMl} ml</strong><small>残り予約と置き換え</small></button>
       <button class="quick-action" type="button" data-record="SOUP_SYRINGE"><strong>${escapeHtml(settings.foods.soupSyringe.name)}を与えた</strong><small>${formatKcal(settings.foods.soupSyringe.caloriesTenthKcal)} kcal・${settings.foods.soupSyringe.countedWaterMl} ml</small></button>
@@ -229,7 +262,7 @@ function timelineHtml(day, interactive) {
   const medication = medicineSchedule(day);
   medication.doses.forEach((dose) => items.push({ kind: "medicine", time: dose.scheduledTime, sort: `${dose.scheduledTime}1`, dose }));
   const scheduledMedicineIds = new Set(medication.doses.map((dose) => dose.event?.id).filter(Boolean));
-  activeEvents.filter((event) => (event.type !== "NORMAL_SET" || !event.linkedSlotId) && !scheduledMedicineIds.has(event.id)).forEach((event) => {
+  activeEvents.filter((event) => (!["BALANCE_LIQUID", "NORMAL_SET"].includes(event.type) || !event.linkedSlotId) && !scheduledMedicineIds.has(event.id)).forEach((event) => {
     const time = displayTime(event.occurredAt, day.timezone);
     items.push({ kind: "event", time, sort: `${time}2`, event });
   });
@@ -266,11 +299,11 @@ function medicineScheduleHtml(day, dose, interactive) {
 }
 
 function slotHtml(day, slot, event, interactive) {
-  const normal = day.settingsSnapshot.foods.normalSet;
+  const balance = day.settingsSnapshot.foods.balanceLiquid;
   const statusClass = slot.status.toLowerCase();
   const available = ["PLANNED", "OVERDUE"].includes(slot.status);
   const unplannedAvailable = ["NOT_REQUIRED", "ADJUSTMENT_AVAILABLE"].includes(slot.status);
-  let meta = slot.role === "ADJUSTMENT" ? "必要かつ安全な場合だけ使用" : `${formatKcal(normal.caloriesTenthKcal)} kcal・${normal.countedWaterMl} ml`;
+  let meta = slot.role === "ADJUSTMENT" ? "必要かつ安全な場合だけ使用" : `${formatKcal(balance.caloriesTenthKcal)} kcal・${balance.amountMl} ml`;
   if (event) meta = `記録 ${displayTime(event.occurredAt, day.timezone)}・${formatKcal(event.caloriesTenthKcal)} kcal・${event.countedWaterMl} ml`;
   else if (slot.changeReason) meta += `・${escapeHtml(slot.changeReason)}`;
   const actions = !interactive ? (event ? `<button type="button" class="link-button" data-edit-event="${event.id}" data-day-id="${day.id}">編集</button>` : "") : `
@@ -281,7 +314,7 @@ function slotHtml(day, slot, event, interactive) {
   return `<article class="slot-card ${statusClass}">
     <time class="timeline-time">${slot.scheduledTime}</time>
     <div class="timeline-body">
-      <div class="slot-top"><span class="slot-title">${slot.role === "ADJUSTMENT" ? "調整枠" : "通常セット"}</span><span class="status-badge ${statusClass}">${STATUS_LABELS[slot.status]}</span></div>
+      <div class="slot-top"><span class="slot-title">${slot.role === "ADJUSTMENT" ? "バランスリキッド調整枠" : "バランスリキッド"}</span><span class="status-badge ${statusClass}">${STATUS_LABELS[slot.status]}</span></div>
       <p class="slot-meta">${meta}</p>
       ${actions ? `<div class="slot-actions">${actions}</div>` : ""}
     </div>
@@ -289,11 +322,16 @@ function slotHtml(day, slot, event, interactive) {
 }
 
 function eventHtml(day, event, interactive) {
-  const className = event.type === "VOMIT_BUSTER" ? "medicine" : event.type === "SOUP_SYRINGE" ? "soup" : "";
+  const className = event.type === "VOMIT_BUSTER" ? "medicine" : event.type === "SOUP_SYRINGE" ? "soup" : event.type === "PLAIN_WATER" ? "water" : event.type === "SOLID_FOOD" ? "solid" : "";
+  const details = event.type === "PLAIN_WATER"
+    ? `${event.countedWaterMl} ml`
+    : event.type === "SOLID_FOOD"
+      ? `${formatKcal(event.caloriesTenthKcal)} kcal`
+      : `${formatKcal(event.caloriesTenthKcal)} kcal・${event.countedWaterMl} ml`;
   return `<article class="event-card ${className}">
     <time class="timeline-time">${displayTime(event.occurredAt, day.timezone)}</time>
     <div class="timeline-body">
-      <div class="event-top"><div><strong class="slot-title">${escapeHtml(EVENT_LABELS[event.type])}</strong><p class="slot-meta">${formatKcal(event.caloriesTenthKcal)} kcal・${event.countedWaterMl} ml${event.note ? `・${escapeHtml(event.note)}` : ""}</p></div>
+      <div class="event-top"><div><strong class="slot-title">${escapeHtml(EVENT_LABELS[event.type] || event.type)}</strong><p class="slot-meta">${details}${event.note ? `・${escapeHtml(event.note)}` : ""}</p></div>
       <button type="button" class="link-button" data-edit-event="${event.id}" data-day-id="${day.id}">${interactive ? "編集" : "詳細"}</button></div>
     </div>
   </article>`;
@@ -330,7 +368,7 @@ function renderHistoryDetail(day) {
     <div class="metric-grid">
       <div class="metric-card"><span class="metric-label">カロリー</span><strong class="metric-value">${formatKcal(summary.actualCaloriesTenthKcal)} kcal</strong><span class="metric-note">目標 ${formatKcal(day.settingsSnapshot.calorieTargetTenthKcal)}</span></div>
       <div class="metric-card"><span class="metric-label">実績水分</span><strong class="metric-value">${summary.actualWaterMl} ml</strong><span class="metric-note">上限 ${day.settingsSnapshot.waterLimitMl} ml</span></div>
-      <div class="metric-card"><span class="metric-label">通常セット</span><strong class="metric-value">${summary.completedNormalSets} 回</strong></div>
+      <div class="metric-card"><span class="metric-label">バランスリキッド</span><strong class="metric-value">${summary.completedBalanceLiquidDoses} 回</strong></div>
       <div class="metric-card"><span class="metric-label">薬</span><strong class="metric-value">${summary.completedMedicineDoses} 回</strong></div>
     </div>
     <div class="section-heading"><h3>実績と予定</h3></div>
@@ -358,12 +396,10 @@ function renderSettings() {
         </div>
       </section>
       <section class="settings-section">
-        <h3>通常セット</h3>
+        <h3>バランスリキッド</h3>
         <div class="field-grid">
-          <div class="field"><label>カロリー (kcal)</label><input name="normalCalories" type="number" min="0" max="5000" step="0.1" value="${formatKcal(s.foods.normalSet.caloriesTenthKcal)}" required></div>
-          <div class="field"><label>管理水分 (ml)</label><input name="normalWater" type="number" min="1" max="10000" step="1" value="${s.foods.normalSet.countedWaterMl}" required></div>
-          <div class="field"><label>バランスリキッド (ml)</label><input name="balanceLiquid" type="number" min="0" max="10000" step="1" value="${s.foods.normalSet.balanceLiquidMl}" required></div>
-          <div class="field"><label>追加水 (ml)</label><input name="addedWater" type="number" min="0" max="10000" step="1" value="${s.foods.normalSet.addedWaterMl}" required></div>
+          <div class="field"><label>1回のカロリー (kcal)</label><input name="balanceCalories" type="number" min="0.1" max="5000" step="0.1" value="${formatKcal(s.foods.balanceLiquid.caloriesTenthKcal)}" required></div>
+          <div class="field"><label>1回量 (ml)</label><input name="balanceAmount" type="number" min="1" max="10000" step="1" value="${s.foods.balanceLiquid.amountMl}" required><span class="field-help">この全量を管理対象水分として数えます。追加の水は「普通の水」で記録します。</span></div>
         </div>
       </section>
       <section class="settings-section">
@@ -387,7 +423,7 @@ function renderSettings() {
       <section class="settings-section">
         <h3>スケジュール</h3>
         <div class="field-grid">
-          <div class="field full"><label>通常枠（カンマ区切り）</label><input name="regularTimes" value="${escapeHtml(s.regularSlotTimes.join(", "))}" required></div>
+          <div class="field full"><label>バランスリキッド予定（カンマ区切り）</label><input name="regularTimes" value="${escapeHtml(s.regularSlotTimes.join(", "))}" required></div>
           <div class="field"><label>調整枠</label><input name="adjustmentTime" type="time" value="${s.adjustmentSlotTime}" required></div>
         </div>
       </section>
@@ -425,10 +461,9 @@ function settingsFromForm(form) {
   try { new Intl.DateTimeFormat("ja-JP", { timeZone: next.timezone }).format(); } catch { throw new Error("タイムゾーンが正しくありません"); }
   next.calorieTargetTenthKcal = tenth("calorieTarget");
   next.waterLimitMl = integer("waterLimit");
-  next.foods.normalSet.caloriesTenthKcal = tenth("normalCalories");
-  next.foods.normalSet.countedWaterMl = integer("normalWater");
-  next.foods.normalSet.balanceLiquidMl = integer("balanceLiquid");
-  next.foods.normalSet.addedWaterMl = integer("addedWater");
+  next.foods.balanceLiquid.caloriesTenthKcal = tenth("balanceCalories");
+  next.foods.balanceLiquid.amountMl = integer("balanceAmount");
+  next.foods.balanceLiquid.countedWaterMl = next.foods.balanceLiquid.amountMl;
   next.foods.chickenMeal.caloriesTenthKcal = tenth("chickenCalories");
   next.foods.chickenMeal.countedWaterMl = integer("chickenWater");
   next.foods.soupSyringe.caloriesTenthKcal = tenth("soupCalories");
@@ -439,7 +474,7 @@ function settingsFromForm(form) {
   next.medicine.scheduledTimes = ["06:00", "12:00"];
   next.regularSlotTimes = parseTimes(String(data.get("regularTimes") || ""));
   next.adjustmentSlotTime = String(data.get("adjustmentTime"));
-  const numericValues = [next.calorieTargetTenthKcal, next.waterLimitMl, next.foods.normalSet.caloriesTenthKcal, next.foods.normalSet.countedWaterMl, next.medicine.doseMl, next.medicine.dosesPerDay];
+  const numericValues = [next.calorieTargetTenthKcal, next.waterLimitMl, next.foods.balanceLiquid.caloriesTenthKcal, next.foods.balanceLiquid.amountMl, next.medicine.doseMl, next.medicine.dosesPerDay];
   if (numericValues.some((value) => !Number.isFinite(value) || value < 0)) throw new Error("数値設定を確認してください");
   return next;
 }
@@ -451,10 +486,65 @@ function rebuildDaySlots(day, settings) {
   const stamp = new Date().toISOString();
   const rebuilt = desired.map(({ time, role }) => {
     const old = oldSlots.find((slot) => slot.scheduledTime === time && slot.role === role);
-    return old || { id: uid("slot"), dayId: day.id, scheduledTime: time, role, status: role === "REGULAR" ? "PLANNED" : "ADJUSTMENT_AVAILABLE", revision: 1, updatedAt: stamp };
+    return old || { id: uid("slot"), dayId: day.id, scheduledTime: time, role, status: role === "REGULAR" ? "PLANNED" : "ADJUSTMENT_AVAILABLE", plannedType: "BALANCE_LIQUID", revision: 1, updatedAt: stamp };
   });
   oldSlots.filter((slot) => keepStatuses.has(slot.status) && !rebuilt.some((item) => item.id === slot.id)).forEach((slot) => rebuilt.push(slot));
   day.slots = rebuilt.sort((a, b) => a.scheduledTime.localeCompare(b.scheduledTime));
+}
+
+async function recordBalanceLiquid(slotId = null) {
+  const day = currentDay();
+  const slot = slotId ? day.slots.find((item) => item.id === slotId) : null;
+  if (slot && day.events.some((event) => event.status === "ACTIVE" && event.linkedSlotId === slot.id)) {
+    showToast(`${slot.scheduledTime}枠はすでに記録されています`);
+    return;
+  }
+  const event = createEvent(day, "BALANCE_LIQUID", new Date().toISOString(), { linkedSlotId: slot?.id });
+  day.events.push(event);
+  recalculatePlan(day, new Date(), reasonForType("BALANCE_LIQUID"), true);
+  await commit();
+  const label = slot ? `${slot.scheduledTime}枠のバランスリキッド` : "バランスリキッド";
+  showToast(`${label}を記録しました`, async () => {
+    event.status = "VOIDED";
+    event.voidReason = "直前操作を取り消し";
+    event.updatedAt = new Date().toISOString();
+    recalculatePlan(day, new Date(), "取消し", true);
+    await commit();
+    showToast("記録を取り消しました");
+  });
+}
+
+function openSimpleAmountDialog(type) {
+  const water = type === "PLAIN_WATER";
+  const label = EVENT_LABELS[type];
+  const fieldLabel = water ? "飲水量 (ml)" : "カロリー (kcal)";
+  dialogContent.innerHTML = `
+    <h2 id="dialog-title">${label}を記録</h2>
+    <p class="sheet-subtitle">現在時刻で記録し、予定へすぐ反映します。</p>
+    <div class="field"><label for="simple-amount">${fieldLabel}</label><input id="simple-amount" name="amount" type="number" inputmode="decimal" min="${water ? "1" : "0.1"}" max="${water ? "10000" : "5000"}" step="${water ? "1" : "0.1"}" required autofocus></div>
+    <div class="button-row"><button type="button" class="button" data-action="close-dialog">戻る</button><button type="submit" class="button primary">記録する</button></div>`;
+  pendingDialogAction = async (form) => {
+    const amount = Number(form.elements.amount.value);
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error(`${fieldLabel}を確認してください`);
+    const options = water
+      ? { caloriesTenthKcal: 0, countedWaterMl: Math.round(amount) }
+      : { caloriesTenthKcal: Math.round(amount * 10), countedWaterMl: 0 };
+    const day = currentDay();
+    const event = createEvent(day, type, new Date().toISOString(), options);
+    day.events.push(event);
+    recalculatePlan(day, new Date(), reasonForType(type), true);
+    await commit();
+    showToast(`${label}を記録しました`, async () => {
+      event.status = "VOIDED";
+      event.voidReason = "直前操作を取り消し";
+      event.updatedAt = new Date().toISOString();
+      recalculatePlan(day, new Date(), "取消し", true);
+      await commit();
+      showToast("記録を取り消しました");
+    });
+  };
+  dialog.showModal();
+  requestAnimationFrame(() => dialog.querySelector("#simple-amount")?.focus());
 }
 
 function openRecordDialog(type, slotId = null, requestedMedicineTime = null) {
@@ -552,15 +642,23 @@ function openEditEventDialog(dayId, eventId) {
   const event = day?.events.find((item) => item.id === eventId);
   if (!day || !event) return;
   const voided = event.status === "VOIDED";
-  dialogContent.innerHTML = `
-    <h2 id="dialog-title">${escapeHtml(EVENT_LABELS[event.type])}の実績</h2>
-    <p class="sheet-subtitle">${event.medicineScheduledTime ? `${event.medicineScheduledTime}の薬予定に紐づいています。` : ""}記録時点の栄養値です。変更後は予定を再計算します。</p>
-    ${voided ? `<div class="dialog-caution">この実績は取消し済みです。理由：${escapeHtml(event.voidReason || "未入力")}</div>` : ""}
-    <div class="field-grid">
-      <div class="field full"><label>記録時刻</label><input name="occurredAt" type="datetime-local" value="${datetimeLocalValue(event.occurredAt)}" required></div>
+  const simpleWater = event.type === "PLAIN_WATER";
+  const simpleSolid = event.type === "SOLID_FOOD";
+  const simple = simpleWater || simpleSolid;
+  const editFields = simpleWater
+    ? `<div class="field full"><label>飲水量 (ml)</label><input name="water" type="number" min="1" max="10000" step="1" value="${event.countedWaterMl}" required></div>`
+    : simpleSolid
+      ? `<div class="field full"><label>カロリー (kcal)</label><input name="calories" type="number" min="0.1" max="5000" step="0.1" value="${formatKcal(event.caloriesTenthKcal)}" required></div>`
+      : `<div class="field full"><label>記録時刻</label><input name="occurredAt" type="datetime-local" value="${datetimeLocalValue(event.occurredAt)}" required></div>
       <div class="field"><label>カロリー (kcal)</label><input name="calories" type="number" min="0" max="5000" step="0.1" value="${formatKcal(event.caloriesTenthKcal)}" required></div>
       <div class="field"><label>管理水分 (ml)</label><input name="water" type="number" min="0" max="10000" step="1" value="${event.countedWaterMl}" required></div>
-      <div class="field full"><label>メモ</label><textarea name="note" maxlength="500" rows="3">${escapeHtml(event.note || "")}</textarea></div>
+      <div class="field full"><label>メモ</label><textarea name="note" maxlength="500" rows="3">${escapeHtml(event.note || "")}</textarea></div>`;
+  dialogContent.innerHTML = `
+    <h2 id="dialog-title">${escapeHtml(EVENT_LABELS[event.type] || event.type)}の実績</h2>
+    <p class="sheet-subtitle">${simple ? `${displayTime(event.occurredAt, day.timezone)}に記録しました。` : event.medicineScheduledTime ? `${event.medicineScheduledTime}の薬予定に紐づいています。` : ""}変更後は予定を再計算します。</p>
+    ${voided ? `<div class="dialog-caution">この実績は取消し済みです。理由：${escapeHtml(event.voidReason || "未入力")}</div>` : ""}
+    <div class="field-grid">
+      ${editFields}
     </div>
     <div class="button-row">
       ${voided ? '<button type="button" class="button" data-action="restore-event">取消しを解除</button>' : '<button type="button" class="button ghost-danger" data-action="void-event">実績を取消す</button>'}
@@ -568,10 +666,14 @@ function openEditEventDialog(dayId, eventId) {
       ${voided ? "" : '<button type="submit" class="button primary">変更を保存</button>'}
     </div>`;
   pendingDialogAction = async (form) => {
-    event.occurredAt = new Date(form.elements.occurredAt.value).toISOString();
-    event.caloriesTenthKcal = Math.round(Number(form.elements.calories.value) * 10);
-    event.countedWaterMl = Number.parseInt(form.elements.water.value, 10);
-    event.note = form.elements.note.value.trim();
+    if (simpleWater) event.countedWaterMl = Number.parseInt(form.elements.water.value, 10);
+    else if (simpleSolid) event.caloriesTenthKcal = Math.round(Number(form.elements.calories.value) * 10);
+    else {
+      event.occurredAt = new Date(form.elements.occurredAt.value).toISOString();
+      event.caloriesTenthKcal = Math.round(Number(form.elements.calories.value) * 10);
+      event.countedWaterMl = Number.parseInt(form.elements.water.value, 10);
+      event.note = form.elements.note.value.trim();
+    }
     event.updatedAt = new Date().toISOString();
     recalculatePlan(day, new Date(), "実績編集", true);
     await commit();
@@ -623,16 +725,15 @@ document.addEventListener("click", (event) => {
     return;
   }
   if (target.dataset.record) {
-    let slotId = null;
-    if (target.dataset.record === "NORMAL_SET") slotId = getNextPlan(currentDay())?.id || null;
-    openRecordDialog(target.dataset.record, slotId, target.dataset.medicineTime || null);
+    if (["PLAIN_WATER", "SOLID_FOOD"].includes(target.dataset.record)) openSimpleAmountDialog(target.dataset.record);
+    else openRecordDialog(target.dataset.record, null, target.dataset.medicineTime || null);
     return;
   }
   if (target.dataset.slotAction) {
     const day = currentDay();
     const slot = day.slots.find((item) => item.id === target.dataset.slotId);
     if (!slot) return;
-    if (target.dataset.slotAction === "give") openRecordDialog("NORMAL_SET", slot.id);
+    if (target.dataset.slotAction === "give") withMutationLock(() => recordBalanceLiquid(slot.id));
     if (target.dataset.slotAction === "skip") openSlotStateDialog(slot.id, "SKIPPED");
     if (target.dataset.slotAction === "fail") openSlotStateDialog(slot.id, "FAILED");
     if (target.dataset.slotAction === "reset") withMutationLock(async () => {
@@ -664,6 +765,7 @@ document.addEventListener("click", (event) => {
     case "save-history-note": saveNote(target.dataset.dayId, "#history-day-note"); break;
     case "undo": if (undoAction) { const action = undoAction; undoAction = null; toast.hidden = true; withMutationLock(action); } break;
     case "clear-data": clearAllData(); break;
+    case "record-balance": withMutationLock(() => recordBalanceLiquid(target.dataset.slotId || null)); break;
     case "start-family-sync": startFamilySync(); break;
     case "copy-invite": copyInviteUrl(); break;
     case "sync-now": familySync?.flush().then(() => familySync.pull()); break;
@@ -686,6 +788,19 @@ async function installApp() {
 }
 
 document.addEventListener("submit", (event) => {
+  if (event.target.id === "join-family-form") {
+    event.preventDefault();
+    if (!event.target.reportValidity()) return;
+    withMutationLock(async () => {
+      try {
+        await familySync.joinFamily(event.target.elements.invite.value);
+        showToast("家族データに参加しました。次回から自動で同期します。");
+      } catch (error) {
+        showToast(error.message || "招待URLを確認できませんでした");
+      }
+    });
+    return;
+  }
   if (event.target.id !== "settings-form") return;
   event.preventDefault();
   if (!event.target.reportValidity()) return;
@@ -756,15 +871,15 @@ function exportData(kind) {
   }
   let rows;
   if (kind === "summary-csv") {
-    rows = [["日付", "犬の名前", "カロリー(kcal)", "実績水分(ml)", "薬回数", "鶏ごはん回数", "通常セット回数", "メモ"]];
+    rows = [["日付", "犬の名前", "カロリー(kcal)", "実績水分(ml)", "薬回数", "鶏ごはん回数", "バランスリキッド回数", "メモ"]];
     [...state.days].sort((a, b) => a.localDate.localeCompare(b.localDate)).forEach((day) => {
       const s = summarizeDay(day);
-      rows.push([day.localDate, day.settingsSnapshot.dogName || "", formatKcal(s.actualCaloriesTenthKcal), s.actualWaterMl, s.completedMedicineDoses, s.chickenMealCount, s.completedNormalSets, day.note || ""]);
+      rows.push([day.localDate, day.settingsSnapshot.dogName || "", formatKcal(s.actualCaloriesTenthKcal), s.actualWaterMl, s.completedMedicineDoses, s.chickenMealCount, s.completedBalanceLiquidDoses, day.note || ""]);
     });
   } else {
     rows = [["日付", "実績ID", "種別", "記録時刻", "カロリー(kcal)", "管理水分(ml)", "状態", "メモ", "取消し理由"]];
     [...state.days].sort((a, b) => a.localDate.localeCompare(b.localDate)).forEach((day) => day.events.forEach((item) => {
-      rows.push([day.localDate, item.id, EVENT_LABELS[item.type], item.occurredAt, formatKcal(item.caloriesTenthKcal), item.countedWaterMl, item.status, item.note || "", item.voidReason || ""]);
+      rows.push([day.localDate, item.id, EVENT_LABELS[item.type] || item.type, item.occurredAt, formatKcal(item.caloriesTenthKcal), item.countedWaterMl, item.status, item.note || "", item.voidReason || ""]);
     }));
   }
   const csv = `\ufeff${rows.map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
@@ -773,7 +888,7 @@ function exportData(kind) {
 }
 
 function validateImportedState(candidate) {
-  if (!candidate || ![1, SCHEMA_VERSION].includes(candidate.schemaVersion) || !candidate.settings || !Array.isArray(candidate.days)) throw new Error("対応していないバックアップ形式です");
+  if (!candidate || ![1, 2, SCHEMA_VERSION].includes(candidate.schemaVersion) || !candidate.settings || !Array.isArray(candidate.days)) throw new Error("対応していないバックアップ形式です");
   for (const day of candidate.days) {
     if (!day.id || !day.localDate || !day.settingsSnapshot || !Array.isArray(day.events) || !Array.isArray(day.slots)) throw new Error("日別データの形式が正しくありません");
   }
@@ -849,23 +964,12 @@ async function copyInviteUrl() {
   }
 }
 
-function migrateMedicineSettings(settings) {
-  if (!settings?.medicine) return;
-  settings.schemaVersion = SCHEMA_VERSION;
-  settings.medicine.dosesPerDay = 2;
-  settings.medicine.scheduledTimes = ["06:00", "12:00"];
-  delete settings.medicine.optionalScheduledTimes;
-}
-
 function migrateState(loaded) {
-  loaded.schemaVersion = SCHEMA_VERSION;
-  migrateMedicineSettings(loaded.settings);
-  loaded.days.forEach((day) => migrateMedicineSettings(day.settingsSnapshot));
-  return loaded;
+  return migrateStateToCurrent(loaded);
 }
 
 function normalizeLoadedState(loaded) {
-  if (!loaded || ![1, SCHEMA_VERSION].includes(loaded.schemaVersion) || !loaded.settings || !Array.isArray(loaded.days)) return createInitialState();
+  if (!loaded || ![1, 2, SCHEMA_VERSION].includes(loaded.schemaVersion) || !loaded.settings || !Array.isArray(loaded.days)) return createInitialState();
   migrateState(loaded);
   loaded.days.forEach((day) => {
     day.events ||= [];
