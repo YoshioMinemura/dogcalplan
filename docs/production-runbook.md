@@ -30,6 +30,7 @@
 3. [`202609050001_care_features.sql`](../supabase/migrations/202609050001_care_features.sql) の内容をすべて貼り付けます。
 4. 対象プロジェクトが本番であることをもう一度確認し、`Run` を1回押します。
 5. `Success. No rows returned` 等の成功表示を確認します。
+6. New queryを開き、続けて [`202609050002_fix_care_profile_ambiguity.sql`](../supabase/migrations/202609050002_fix_care_profile_ambiguity.sql) の内容をすべて貼り付けて実行し、成功表示を確認します。
 
 途中でSQLエラーになった場合は、古い貼り付け内容を部分的に続行せず、リポジトリ上の修正版ファイルを開き直して全体を再実行します。このmigrationは、失敗後の再実行でも既存オブジェクトを壊さない形にしてあります。
 
@@ -47,6 +48,8 @@ notification_jobs
 ```
 
 ここで失敗した場合は、フロントエンドをまだpushしないでください。既に適用済みのmigrationを削除・編集してやり直すのではなく、エラー内容に応じた追加migrationで修正します。
+
+`202609050002_fix_care_profile_ambiguity.sql`は、公開後に介護機能の初期化で発生した `column reference "user_id" is ambiguous` を修正します。既に`202609050001_care_features.sql`を適用済みの場合は、追加migrationだけを実行してください。適用後、公開アプリを再読み込みします。フロントエンドの再pushは不要です。
 
 ## 3. Web Push用のVAPID鍵を作る
 

@@ -28,8 +28,10 @@
 - [x] 点眼設定、日次セッション、担当排他、5分間隔、担当引き継ぎ、Realtime
 - [x] 個人別通知設定、Push Subscription、通知ジョブ、Edge Function
 - [x] 食事JSONの取込み互換を維持し、全期間の排泄・点眼を閲覧用介護JSONへ出力
-- [x] 新migrationを本番Supabaseへ適用（ユーザー報告で成功を確認）
-- [ ] VAPID/Edge Function/Cron設定、GitHub Pages公開はユーザー作業
+- [x] `202609050001_care_features.sql`を本番Supabaseへ適用（ユーザー報告で成功を確認）
+- [x] `202609050002_fix_care_profile_ambiguity.sql`を本番Supabaseへ適用（ユーザー報告で成功を確認）
+- [x] 更新版をGitHub Pagesへ公開（ユーザー報告）
+- [ ] VAPID/Edge Function/Cron設定の実運用確認
 - [ ] 実Supabaseでの2端末・Push通知確認
 
 ## 次スレッド開始時
@@ -103,6 +105,13 @@
 - `docs/production-runbook.md`の手順3を、Windows PowerShellでの事前確認、`ERR_INVALID_URL`の切り分け、Node.js標準機能だけで生成する代替コマンドまで含む内容へ更新した。
 - PowerShellでWSLのUNCパスを現在地にすると`npx`が`ERR_INVALID_URL`になったため、手順5をWindowsの一時フォルダーでの動作確認と、コマンドプロンプトの`pushd`による一時ドライブ割当てを使う手順へ修正した。
 - `CRON_SECRET`をSQL Editorへ直接貼る手順は実行履歴に残る可能性があるため、手順6をSupabase DashboardのVault画面から登録する方式へ変更し、SQLは予備手段として残した。
+
+### 2026-09-05 介護プロフィール初期化RPC修正
+
+- GitHub Pages公開後、介護機能の初期化で `column reference "user_id" is ambiguous` が発生した。
+- `ensure_care_profile()`の`RETURNS TABLE`出力変数`user_id`と`ON CONFLICT (user_id)`がPL/pgSQL内で衝突することを特定した。
+- 適用済みmigrationは変更せず、競合対象を`ON CONFLICT ON CONSTRAINT profiles_pkey`で指定する追加migration `202609050002_fix_care_profile_ambiguity.sql`を作成した。
+- ユーザーが追加migrationを本番へ適用し、成功を報告した。複数端末とPushを含む実運用確認は継続する。
 
 ## スレッド終了時の記入テンプレート
 

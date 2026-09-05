@@ -206,6 +206,8 @@ RLSにより、匿名認証済みで、かつ `household_members` に属する�
 
 `202609050001_care_features.sql` はプロフィール、役割、排泄、点眼設定・セッション・step、通知設定、Push Subscription、通知ジョブ、および専用RPC/RLSを追加する。既存migrationは変更せず、必ず日付順に適用する。
 
+`202609050002_fix_care_profile_ambiguity.sql` は、`ensure_care_profile()`の`RETURNS TABLE`出力変数と`ON CONFLICT`列名の衝突を避けるため、競合対象を`profiles_pkey`制約名で指定する。`202609050001_care_features.sql`の後に適用する。
+
 `dispatch-notifications` Edge Functionは1分ごとに呼び出す。Asia/Tokyoの当日点眼セッションを冪等生成し、期限到来ジョブを通知設定に従って配信する。定時通知は通知ONの全員、次step通知は担当者だけが対象である。
 
 ## 8. PWAと公開

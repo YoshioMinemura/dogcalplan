@@ -290,8 +290,9 @@ Supabase Freeは1週間の非アクティブで停止する可能性があり、
 - [x] 家族へ共有して運用開始
 - [x] 点眼・排泄・Pushのコードと追加migrationを作成
 - [x] `202609050001_care_features.sql`を本番へ適用
-- [ ] VAPID、Edge Function、1分間隔の通知呼出しを設定
-- [ ] 更新版をGitHub Pagesへ公開
+- [x] `202609050002_fix_care_profile_ambiguity.sql`を本番へ適用（ユーザー報告）
+- [x] VAPID、Edge Function、1分間隔の通知呼出しを設定（ユーザー報告）
+- [x] 更新版をGitHub Pagesへ公開（ユーザー報告）
 - [ ] 今回の更新後、複数端末、点眼排他、Push、ホーム画面版の再参加を確認
 
 ## 公式資料
