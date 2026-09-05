@@ -1,6 +1,7 @@
 import { createHousehold, findCurrentHousehold, inviteTokenFromInput, inviteTokenFromLocation, joinWithInvite } from "./auth.js";
 import { loadSyncMetadata, saveSyncMetadata } from "./db.js";
 import { getSupabaseClient } from "./supabase-client.js";
+import { migrateStateToCurrent } from "./domain.js";
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const equal = (left, right) => JSON.stringify(left) === JSON.stringify(right);
@@ -67,7 +68,7 @@ function resolveDuplicateEvents(day, remoteEventIds, conflicts) {
       duplicate.voidReason = "同期競合: 別端末で同じ予定を記録済み";
       duplicate.updatedAt = new Date(Math.max(entityTime(duplicate), entityTime(kept))).toISOString();
     }
-    const target = key.startsWith("medicine:") ? `${key.slice(9)}の薬` : "同じバランスリキッド枠";
+    const target = key.startsWith("medicine:") ? `${key.slice(9)}の薬` : "同じ通常セット枠";
     conflicts.push(`${target}が別端末でも記録されていたため、先に同期された1件だけを有効にしました。`);
   }
 }
@@ -140,6 +141,9 @@ function mergeDay(remoteDay, localDay, baseDay, conflicts) {
 }
 
 export function mergeFamilyStates(remoteState, localState, baseState = null) {
+  remoteState = remoteState ? migrateStateToCurrent(clone(remoteState)) : null;
+  localState = localState ? migrateStateToCurrent(clone(localState)) : null;
+  baseState = baseState ? migrateStateToCurrent(clone(baseState)) : null;
   if (!remoteState) return { state: clone(localState), conflicts: [] };
   if (!localState) return { state: clone(remoteState), conflicts: [] };
   const conflicts = [];

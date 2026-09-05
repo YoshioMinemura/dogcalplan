@@ -5,8 +5,10 @@ import {
 } from "./domain.js";
 import { clearState, loadState, saveState } from "./db.js";
 import { createFamilySync } from "./sync.js";
+import { createCareFeatures, EYE_DROP_TIMES, formatCountdown, secondsUntil, validateEyeDropSettings } from "./care.js";
 
 const todayView = document.querySelector("#today-view");
+const eyedropsView = document.querySelector("#eyedrops-view");
 const historyView = document.querySelector("#history-view");
 const settingsView = document.querySelector("#settings-view");
 const saveStatus = document.querySelector("#save-status");
@@ -16,7 +18,8 @@ const actionForm = document.querySelector("#action-form");
 const toast = document.querySelector("#toast");
 
 let state;
-let route = "today";
+let targetEyeSessionId = new URLSearchParams(location.search).get("eyeSession");
+let route = targetEyeSessionId ? "eyedrops" : "today";
 let selectedHistoryDayId = null;
 let pendingDialogAction = null;
 let toastTimer = null;
@@ -25,6 +28,12 @@ let mutationLocked = false;
 let volatileMode = false;
 let installPromptEvent = null;
 let familySync = null;
+let careFeatures = null;
+let pendingDisplayName = "";
+let careView = {
+  ready: false, loading: false, profile: null, healthEvents: [], eyeDropSettings: null,
+  eyeDropSessions: [], notificationPreferences: {}, error: "", online: navigator.onLine
+};
 let syncView = { phase: "initializing", message: "同期を確認中…", error: false, connected: false, pending: false, conflicts: [], inviteUrl: "" };
 
 window.addEventListener("beforeinstallprompt", (event) => {
@@ -61,6 +70,13 @@ function percent(value, target) {
   return Math.max(0, Math.min(100, target ? (value / target) * 100 : 0));
 }
 
+function actorFields() {
+  return {
+    recordedByUserId: careView.userId || undefined,
+    recordedByName: careView.profile?.display_name || undefined
+  };
+}
+
 function alertHtml(warning) {
   const icon = warning.level === "critical" ? "!" : warning.level === "caution" ? "△" : "i";
   return `<div class="alert ${warning.level}" role="${warning.level === "critical" ? "alert" : "status"}">
@@ -74,7 +90,7 @@ function installHelpHtml() {
   let dismissed = false;
   try { dismissed = localStorage.getItem("dogcare-install-help-dismissed") === "1"; } catch { /* no-op */ }
   if (standalone || dismissed) return "";
-  const isiOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+  const isiOS = new RegExp("iPad|iPhone|iPod").test(navigator.userAgent);
   const message = isiOS
     ? "Safariの共有ボタンから「ホーム画面に追加」を選ぶと、オフラインでもすぐ開けます。"
     : installPromptEvent ? "ホーム画面へ追加すると、オフラインでもアプリのように開けます。" : "ブラウザのメニューから「ホーム画面に追加」または「アプリをインストール」を選べます。";
@@ -129,6 +145,7 @@ function joinFamilyHtml() {
     <section class="settings-section">
       <div class="alert caution"><span class="alert-icon" aria-hidden="true">i</span><div><strong>まだ家族と同期されていません</strong><p>メッセージ等で受け取った完全な招待URLを貼り付けてください。参加後は、次回からホーム画面のアイコンを押すだけで自動同期します。</p></div></div>
       <form id="join-family-form" class="join-form">
+        <div class="field full"><label for="join-display-name">あなたの表示名</label><input id="join-display-name" name="displayName" maxlength="60" required placeholder="例：母"></div>
         <div class="field full"><label for="join-invite-url">招待URL</label><textarea id="join-invite-url" name="invite" rows="4" required autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://…/#invite=…"></textarea></div>
         <div class="button-row"><button type="submit" class="button primary">家族データに参加</button></div>
       </form>
@@ -180,6 +197,7 @@ async function withMutationLock(callback) {
 
 function renderApp() {
   todayView.hidden = route !== "today";
+  eyedropsView.hidden = route !== "eyedrops";
   historyView.hidden = route !== "history";
   settingsView.hidden = route !== "settings";
   document.querySelectorAll("[data-route]").forEach((button) => {
@@ -188,8 +206,129 @@ function renderApp() {
     if (active) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current");
   });
   if (route === "today") renderToday();
+  if (route === "eyedrops") renderEyeDrops();
   if (route === "history") renderHistory();
   if (route === "settings") renderSettings();
+}
+
+function currentHealthEvents() {
+  const timezone = state?.settings?.timezone || "Asia/Tokyo";
+  const date = localDateInTimezone(new Date(), timezone);
+  return (careView.healthEvents || []).filter((item) => item.status === "ACTIVE"
+    && localDateInTimezone(parseIso(item.occurred_at), timezone) === date);
+}
+
+function currentEyeSessions() {
+  const date = localDateInTimezone(new Date(), state?.settings?.timezone || "Asia/Tokyo");
+  return (careView.eyeDropSessions || []).filter((session) => session.local_date === date)
+    .sort((left, right) => String(left.scheduled_time).localeCompare(String(right.scheduled_time)));
+}
+
+function healthQuickHtml() {
+  if (!careView.ready) return careView.error
+    ? `<div class="alert critical"><span class="alert-icon">!</span><div><strong>介護機能を準備できません</strong><p>${escapeHtml(careView.error)}。新しいSupabase migrationの適用を確認してください。</p></div></div>`
+    : '<div class="panel care-loading" role="status">点眼・排泄データを確認中…</div>';
+  const events = currentHealthEvents();
+  const latest = (type) => events.find((item) => item.event_type === type);
+  const urine = latest("urine");
+  const stool = latest("stool");
+  const offline = !careView.online;
+  return `<section class="care-section" aria-labelledby="health-title">
+    <div class="section-heading"><h3 id="health-title">排泄</h3><span>${offline ? "オンライン復帰後に記録" : "家族へ即時共有"}</span></div>
+    <div class="health-actions">
+      <button type="button" class="health-button urine" data-health="urine"${offline ? " disabled" : ""}><strong>小</strong><small>現在時刻で記録</small></button>
+      <button type="button" class="health-button stool" data-health="stool"${offline ? " disabled" : ""}><strong>大</strong><small>現在時刻で記録</small></button>
+    </div>
+    <p class="health-latest">最終　小 ${urine ? displayTime(urine.occurred_at, state.settings.timezone) : "—"}　／　大 ${stool ? displayTime(stool.occurred_at, state.settings.timezone) : "—"}</p>
+  </section>`;
+}
+
+function eyeSessionCardHtml(session, compact = false) {
+  const steps = session.eye_drop_steps || [];
+  const completed = steps.filter((step) => step.status === "completed").length;
+  const nextStep = steps.find((step) => step.status !== "completed" && step.status !== "cancelled");
+  const remaining = secondsUntil(nextStep?.available_at);
+  const mine = session.operator_user_id && session.operator_user_id === careView.userId;
+  const offline = !careView.online;
+  const statusLabel = session.status === "completed" ? "✓ 完了"
+    : session.status === "in_progress" ? "● 進行中" : session.status === "cancelled" ? "― 中止" : "○ 未実施";
+  let action = "";
+  if (!steps.length) action = '<span class="slot-meta">点眼内容が未設定です</span>';
+  else if (session.status === "pending") {
+    action = `<button type="button" class="button primary" data-eye-claim="${session.id}"${offline ? " disabled" : ""}>この回を担当する</button>`;
+  } else if (session.status === "in_progress" && nextStep && mine) {
+    action = remaining > 0
+      ? `<button type="button" class="button" disabled>点眼${escapeHtml(nextStep.drop_name)}まで ${formatCountdown(remaining)}</button>`
+      : `<button type="button" class="button primary" data-eye-complete="${nextStep.id}"${offline ? " disabled" : ""}>点眼${escapeHtml(nextStep.drop_name)} 完了</button>`;
+  } else if (session.status === "in_progress" && !mine) {
+    action = `<button type="button" class="button" data-eye-takeover="${session.id}"${offline ? " disabled" : ""}>担当を引き継ぐ</button>`;
+  }
+  return `<article data-eye-session-id="${session.id}" class="eye-session ${session.status}${compact ? " compact" : ""}">
+    <div class="eye-session-head"><strong>${String(session.scheduled_time).slice(0, 5)} 点眼</strong><span>${statusLabel}</span></div>
+    <p class="slot-meta">${steps.map((step) => `${escapeHtml(step.drop_name)}${step.status === "completed" ? " ✓" : ""}`).join(" → ") || "点眼設定なし"}</p>
+    ${session.operator_display_name ? `<p class="eye-operator">担当: ${escapeHtml(session.operator_display_name)}　${completed}/${steps.length}</p>` : ""}
+    ${nextStep && session.status === "in_progress" ? `<p class="eye-next">次: 点眼${escapeHtml(nextStep.drop_name)}${remaining ? `（あと ${formatCountdown(remaining)}）` : "（実施できます）"}</p>` : ""}
+    ${compact ? "" : `<div class="button-row">${action}</div>`}
+  </article>`;
+}
+
+function eyeTodayHtml() {
+  if (!careView.ready) return "";
+  const sessions = currentEyeSessions();
+  const active = sessions.find((session) => session.status === "in_progress");
+  const next = active || sessions.find((session) => !["completed", "cancelled"].includes(session.status));
+  if (!next) return '<section class="eye-overview completed"><strong>本日の点眼は完了しました</strong></section>';
+  return `<section class="eye-overview ${active ? "active" : ""}">
+    <div class="section-heading"><h3>${active ? "進行中の点眼" : "次回の点眼"}</h3><button type="button" class="link-button" data-route="eyedrops">一覧を見る</button></div>
+    ${eyeSessionCardHtml(next)}
+  </section>`;
+}
+
+function renderEyeDrops() {
+  if (!careView.ready) {
+    eyedropsView.innerHTML = `<div class="page-heading"><div><h2 id="eyedrops-title">点眼</h2></div></div>${healthQuickHtml()}`;
+    return;
+  }
+  const sessions = currentEyeSessions();
+  eyedropsView.innerHTML = `
+    <div class="page-heading"><div><h2 id="eyedrops-title">今日の点眼</h2><p>担当取得と完了操作はオンライン必須です</p></div><span class="date-chip">${careView.online ? "オンライン" : "オフライン"}</span></div>
+    ${!careView.online ? alertHtml({ level: "caution", title: "現在オフラインです", message: "共有状態が最新ではない可能性があります。点眼操作はオンライン復帰後に行ってください。" }) : ""}
+    <div class="eye-session-list">${sessions.length ? sessions.map((session) => eyeSessionCardHtml(session)).join("") : '<div class="empty-state">本日の点眼セッションはありません。設定画面で点眼内容を登録してください。</div>'}</div>`;
+  if (targetEyeSessionId && sessions.some((session) => session.id === targetEyeSessionId)) {
+    const target = eyedropsView.querySelector(`[data-eye-session-id="${targetEyeSessionId}"]`);
+    targetEyeSessionId = null;
+    requestAnimationFrame(() => target?.scrollIntoView({ block: "center" }));
+  }
+}
+
+function careSettingsHtml() {
+  if (!careView.ready) return `<div class="section-heading"><h3>点眼・排泄</h3></div>${healthQuickHtml()}`;
+  const profile = careView.profile || {};
+  const preferences = careView.notificationPreferences || {};
+  const eye = careView.eyeDropSettings || { drop_types: [], templates: [], interval_seconds: 300 };
+  const typesText = (eye.drop_types || []).map((item) => `${item.id}|${item.name}|${item.requiredDailyCount || 0}`).join("\n");
+  const typeNames = new Map((eye.drop_types || []).map((item) => [item.id, item.name]));
+  const scheduleText = EYE_DROP_TIMES.map((time) => {
+    const template = (eye.templates || []).find((item) => item.time === time);
+    return `${time}=${(template?.steps || []).map((id) => typeNames.get(id) || id).join(",")}`;
+  }).join("\n");
+  return `<div class="section-heading"><h3>個人・通知設定</h3><span>${profile.role === "admin" ? "管理者" : "メンバー"}</span></div>
+    <form id="care-profile-form" class="settings-section settings-form">
+      <div class="field"><label for="care-display-name">あなたの表示名</label><input id="care-display-name" name="displayName" maxlength="60" value="${escapeHtml(profile.display_name || "")}" required></div>
+      <label class="check-field"><input name="master" type="checkbox" ${preferences.master_enabled ? "checked" : ""}> すべての通知</label>
+      <label class="check-field"><input name="scheduled" type="checkbox" ${preferences.scheduled_eye_drop_enabled ? "checked" : ""}> 定時点眼通知</label>
+      <label class="check-field"><input name="timer" type="checkbox" ${preferences.active_eye_drop_timer_enabled ? "checked" : ""}> 担当中の次回点眼通知</label>
+      <p class="field-help">端末の通知権限: ${escapeHtml(careView.notificationPermission)} ／ Push設定: ${careView.pushConfigured ? "設定済み" : "VAPID公開鍵が未設定"}</p>
+      <div class="button-row"><button type="button" class="button" data-action="enable-push">この端末で通知を許可</button><button type="submit" class="button primary">個人設定を保存</button></div>
+    </form>
+    <div class="section-heading"><h3>点眼設定</h3><span>変更は翌日以降</span></div>
+    ${profile.role !== "admin" ? '<div class="panel"><p class="slot-meta">点眼設定は管理者だけが変更できます。</p></div>' : `<form id="eye-settings-form" class="settings-section settings-form">
+      <div class="field"><label>点眼薬（1行ごとに ID|表示名|1日必要回数）</label><textarea name="dropTypes" rows="6" required>${escapeHtml(typesText)}</textarea></div>
+      <div class="field"><label>時刻別スケジュール（表示名をカンマ区切り）</label><textarea name="templates" rows="11" required>${escapeHtml(scheduleText)}</textarea></div>
+      <div class="field"><label>点眼間隔（分）</label><input name="intervalMinutes" type="number" min="1" max="60" step="1" value="${Math.round(eye.interval_seconds / 60)}" required></div>
+      <p class="field-help">必要回数と予定回数が違う場合は保存前に警告します。今日生成済みのセッションは変更しません。</p>
+      <div class="button-row"><button type="submit" class="button primary">翌日以降の点眼設定を保存</button></div>
+    </form>`}`;
 }
 
 function renderToday() {
@@ -217,6 +356,8 @@ function renderToday() {
       <div><h2 id="today-title">今日${settings.dogName ? `の${escapeHtml(settings.dogName)}` : ""}</h2><p>${formatDateJa(day.localDate)}</p></div>
       <span class="date-chip">予定は随時再計算</span>
     </div>
+    ${eyeTodayHtml()}
+    ${healthQuickHtml()}
     <section class="hero" aria-label="本日のカロリー">
       <p class="hero-label">摂取カロリー</p>
       <div class="hero-value"><strong>${actualKcal}</strong><span>/ ${targetKcal} kcal</span></div>
@@ -227,17 +368,17 @@ function renderToday() {
       <div class="metric-card"><span class="metric-label">実績水分</span><strong class="metric-value">${summary.actualWaterMl} / ${settings.waterLimitMl} ml</strong><span class="metric-note">実際に摂取</span></div>
       <div class="metric-card"><span class="metric-label">薬を含む見込み</span><strong class="metric-value">${summary.projectedCommittedWaterMl} ml</strong><span class="metric-note">安全残量 ${summary.safeRemainingWaterMl} ml</span></div>
       <div class="metric-card"><span class="metric-label">鶏ごはん</span><strong class="metric-value">${summary.chickenMealCount} 食</strong><span class="metric-note">1食 ${formatKcal(settings.foods.chickenMeal.caloriesTenthKcal)} kcal</span></div>
-      <div class="metric-card"><span class="metric-label">バランスリキッド</span><strong class="metric-value">${summary.completedBalanceLiquidDoses} 回完了</strong><span class="metric-note">必要合計 ${completedTotal} 回</span></div>
+      <div class="metric-card"><span class="metric-label">${escapeHtml(settings.foods.balanceLiquid.name)}</span><strong class="metric-value">${summary.completedBalanceLiquidDoses} 回完了</strong><span class="metric-note">必要合計 ${completedTotal} 回</span></div>
     </div>
     <section class="next-card" aria-label="次回予定">
       <strong class="next-time">${next ? next.scheduledTime : "—"}</strong>
-      <div><strong>${next ? escapeHtml(settings.foods.balanceLiquid.name) : "追加不要"}</strong><p>${next ? `${formatKcal(settings.foods.balanceLiquid.caloriesTenthKcal)} kcal・${settings.foods.balanceLiquid.amountMl} ml` : summary.calorieReachable ? "現在の予定で目標に到達します" : "安全な追加予定はありません"}</p></div>
+      <div><strong>${next ? escapeHtml(settings.foods.balanceLiquid.name) : "追加不要"}</strong><p>${next ? `${formatKcal(settings.foods.balanceLiquid.caloriesTenthKcal)} kcal・管理水分${settings.foods.balanceLiquid.countedWaterMl} ml` : summary.calorieReachable ? "現在の予定で目標に到達します" : "安全な追加予定はありません"}</p></div>
     </section>
     <div class="alerts">${syncAlertsHtml()}${summary.warnings.map(alertHtml).join("")}${installHelpHtml()}</div>
 
     <div class="section-heading"><h3>すぐに記録</h3><span>入力後すぐ反映</span></div>
     <div class="quick-grid">
-      <button class="quick-action primary" type="button" data-action="record-balance"${recordTarget ? ` data-slot-id="${recordTarget.id}"` : ""}><strong>${escapeHtml(settings.foods.balanceLiquid.name)}を与えた</strong><small>${recordTarget ? `${recordTarget.scheduledTime}枠・` : "予定外・"}${formatKcal(settings.foods.balanceLiquid.caloriesTenthKcal)} kcal・${settings.foods.balanceLiquid.amountMl} ml</small></button>
+      <button class="quick-action primary" type="button" data-action="record-balance"${recordTarget ? ` data-slot-id="${recordTarget.id}"` : ""}><strong>${escapeHtml(settings.foods.balanceLiquid.name)}を与えた</strong><small>${recordTarget ? `${recordTarget.scheduledTime}枠・` : "予定外・"}${formatKcal(settings.foods.balanceLiquid.caloriesTenthKcal)} kcal・管理水分${settings.foods.balanceLiquid.countedWaterMl} ml</small></button>
       <button class="quick-action water" type="button" data-record="PLAIN_WATER"><strong>普通の水を飲んだ</strong><small>飲水量だけ入力</small></button>
       <button class="quick-action solid" type="button" data-record="SOLID_FOOD"><strong>固形食を食べた</strong><small>カロリーだけ入力</small></button>
       <button class="quick-action chicken" type="button" data-record="CHICKEN_MEAL"><strong>${escapeHtml(settings.foods.chickenMeal.name)}を食べた</strong><small>${formatKcal(settings.foods.chickenMeal.caloriesTenthKcal)} kcal・水分${settings.foods.chickenMeal.countedWaterMl} ml</small></button>
@@ -283,7 +424,7 @@ function medicineScheduleHtml(day, dose, interactive) {
   const statusClass = status.toLowerCase();
   const medicine = day.settingsSnapshot.medicine;
   const meta = dose.event
-    ? `記録 ${displayTime(dose.event.occurredAt, day.timezone)}・${dose.event.countedWaterMl} ml`
+    ? `記録 ${displayTime(dose.event.occurredAt, day.timezone)}・${dose.event.countedWaterMl} ml${dose.event.recordedByName ? `・${escapeHtml(dose.event.recordedByName)}` : ""}`
     : `${medicine.doseMl} ml・未投与分は水分枠に予約済み`;
   const action = dose.event
     ? `<button type="button" class="mini-btn" data-edit-event="${dose.event.id}" data-day-id="${day.id}">実績を編集</button>`
@@ -303,8 +444,8 @@ function slotHtml(day, slot, event, interactive) {
   const statusClass = slot.status.toLowerCase();
   const available = ["PLANNED", "OVERDUE"].includes(slot.status);
   const unplannedAvailable = ["NOT_REQUIRED", "ADJUSTMENT_AVAILABLE"].includes(slot.status);
-  let meta = slot.role === "ADJUSTMENT" ? "必要かつ安全な場合だけ使用" : `${formatKcal(balance.caloriesTenthKcal)} kcal・${balance.amountMl} ml`;
-  if (event) meta = `記録 ${displayTime(event.occurredAt, day.timezone)}・${formatKcal(event.caloriesTenthKcal)} kcal・${event.countedWaterMl} ml`;
+  let meta = slot.role === "ADJUSTMENT" ? "必要かつ安全な場合だけ使用" : `${formatKcal(balance.caloriesTenthKcal)} kcal・管理水分${balance.countedWaterMl} ml`;
+  if (event) meta = `記録 ${displayTime(event.occurredAt, day.timezone)}・${formatKcal(event.caloriesTenthKcal)} kcal・${event.countedWaterMl} ml${event.recordedByName ? `・${escapeHtml(event.recordedByName)}` : ""}`;
   else if (slot.changeReason) meta += `・${escapeHtml(slot.changeReason)}`;
   const actions = !interactive ? (event ? `<button type="button" class="link-button" data-edit-event="${event.id}" data-day-id="${day.id}">編集</button>` : "") : `
     ${available ? `<button type="button" class="mini-btn give" data-slot-action="give" data-slot-id="${slot.id}">与えた</button><button type="button" class="mini-btn" data-slot-action="skip" data-slot-id="${slot.id}">スキップ</button><button type="button" class="mini-btn" data-slot-action="fail" data-slot-id="${slot.id}">失敗</button>` : ""}
@@ -314,7 +455,7 @@ function slotHtml(day, slot, event, interactive) {
   return `<article class="slot-card ${statusClass}">
     <time class="timeline-time">${slot.scheduledTime}</time>
     <div class="timeline-body">
-      <div class="slot-top"><span class="slot-title">${slot.role === "ADJUSTMENT" ? "バランスリキッド調整枠" : "バランスリキッド"}</span><span class="status-badge ${statusClass}">${STATUS_LABELS[slot.status]}</span></div>
+      <div class="slot-top"><span class="slot-title">${slot.role === "ADJUSTMENT" ? `${escapeHtml(balance.name)}調整枠` : escapeHtml(balance.name)}</span><span class="status-badge ${statusClass}">${STATUS_LABELS[slot.status]}</span></div>
       <p class="slot-meta">${meta}</p>
       ${actions ? `<div class="slot-actions">${actions}</div>` : ""}
     </div>
@@ -331,10 +472,28 @@ function eventHtml(day, event, interactive) {
   return `<article class="event-card ${className}">
     <time class="timeline-time">${displayTime(event.occurredAt, day.timezone)}</time>
     <div class="timeline-body">
-      <div class="event-top"><div><strong class="slot-title">${escapeHtml(EVENT_LABELS[event.type] || event.type)}</strong><p class="slot-meta">${details}${event.note ? `・${escapeHtml(event.note)}` : ""}</p></div>
+      <div class="event-top"><div><strong class="slot-title">${escapeHtml(EVENT_LABELS[event.type] || event.type)}</strong><p class="slot-meta">${details}${event.recordedByName ? `・${escapeHtml(event.recordedByName)}` : ""}${event.note ? `・${escapeHtml(event.note)}` : ""}</p></div>
       <button type="button" class="link-button" data-edit-event="${event.id}" data-day-id="${day.id}">${interactive ? "編集" : "詳細"}</button></div>
     </div>
   </article>`;
+}
+
+function careHistoryHtml(day) {
+  if (!careView.ready) return "";
+  const health = (careView.healthEvents || []).filter((item) =>
+    localDateInTimezone(parseIso(item.occurred_at), day.timezone) === day.localDate)
+    .map((item) => ({
+      time: item.occurred_at,
+      html: `<strong>${item.event_type === "urine" ? "小" : "大"}${item.status === "VOIDED" ? "（取消し）" : ""}</strong>　${escapeHtml(item.recorded_by_name || "家族")}`
+    }));
+  const eye = (careView.eyeDropSessions || []).filter((session) => session.local_date === day.localDate)
+    .flatMap((session) => (session.eye_drop_steps || []).filter((step) => step.status === "completed").map((step) => ({
+      time: step.completed_at,
+      html: `<strong>点眼${escapeHtml(step.drop_name)}</strong>　${escapeHtml(step.completed_by_name || session.operator_display_name || "家族")}`
+    })));
+  const items = [...health, ...eye].sort((left, right) => String(right.time).localeCompare(String(left.time)));
+  return `<div class="section-heading"><h3>点眼・排泄履歴</h3><span>${items.length}件</span></div>
+    <div class="panel care-history">${items.length ? items.map((item) => `<div><time>${displayTime(item.time, day.timezone)}</time><span>${item.html}</span></div>`).join("") : '<p class="slot-meta">点眼・排泄の記録はありません。</p>'}</div>`;
 }
 
 function renderHistory() {
@@ -349,9 +508,10 @@ function renderHistory() {
     <div class="history-list">${days.length ? days.map((day) => {
       const summary = summarizeDay(day);
       const hasWarning = summary.projectedCommittedWaterMl > day.settingsSnapshot.waterLimitMl;
+      const healthCount = (careView.healthEvents || []).filter((item) => item.status === "ACTIVE" && localDateInTimezone(parseIso(item.occurred_at), day.timezone) === day.localDate).length;
       return `<button type="button" class="history-item" data-history-day="${day.id}">
         <div class="history-item-top"><strong>${formatDateJa(day.localDate, true)}</strong><small>${hasWarning ? "! 水分超過" : day.settingsSnapshot.dogName ? escapeHtml(day.settingsSnapshot.dogName) : "記録詳細"}</small></div>
-        <div class="history-stats"><span>カロリー<b>${formatKcal(summary.actualCaloriesTenthKcal)} kcal</b></span><span>実績水分<b>${summary.actualWaterMl} ml</b></span><span>薬 / 鶏ごはん<b>${summary.completedMedicineDoses}回 / ${summary.chickenMealCount}食</b></span></div>
+        <div class="history-stats"><span>カロリー<b>${formatKcal(summary.actualCaloriesTenthKcal)} kcal</b></span><span>実績水分<b>${summary.actualWaterMl} ml</b></span><span>薬 / 排泄<b>${summary.completedMedicineDoses}回 / ${healthCount}件</b></span></div>
       </button>`;
     }).join("") : '<div class="empty-state">履歴はまだありません。</div>'}</div>`;
 }
@@ -368,9 +528,10 @@ function renderHistoryDetail(day) {
     <div class="metric-grid">
       <div class="metric-card"><span class="metric-label">カロリー</span><strong class="metric-value">${formatKcal(summary.actualCaloriesTenthKcal)} kcal</strong><span class="metric-note">目標 ${formatKcal(day.settingsSnapshot.calorieTargetTenthKcal)}</span></div>
       <div class="metric-card"><span class="metric-label">実績水分</span><strong class="metric-value">${summary.actualWaterMl} ml</strong><span class="metric-note">上限 ${day.settingsSnapshot.waterLimitMl} ml</span></div>
-      <div class="metric-card"><span class="metric-label">バランスリキッド</span><strong class="metric-value">${summary.completedBalanceLiquidDoses} 回</strong></div>
+      <div class="metric-card"><span class="metric-label">通常セット</span><strong class="metric-value">${summary.completedBalanceLiquidDoses} 回</strong></div>
       <div class="metric-card"><span class="metric-label">薬</span><strong class="metric-value">${summary.completedMedicineDoses} 回</strong></div>
     </div>
+    ${careHistoryHtml(day)}
     <div class="section-heading"><h3>実績と予定</h3></div>
     ${timelineHtml(day, false)}
     <div class="section-heading"><h3>日次メモ</h3></div>
@@ -396,10 +557,11 @@ function renderSettings() {
         </div>
       </section>
       <section class="settings-section">
-        <h3>バランスリキッド</h3>
+        <h3>通常セット</h3>
         <div class="field-grid">
           <div class="field"><label>1回のカロリー (kcal)</label><input name="balanceCalories" type="number" min="0.1" max="5000" step="0.1" value="${formatKcal(s.foods.balanceLiquid.caloriesTenthKcal)}" required></div>
-          <div class="field"><label>1回量 (ml)</label><input name="balanceAmount" type="number" min="1" max="10000" step="1" value="${s.foods.balanceLiquid.amountMl}" required><span class="field-help">この全量を管理対象水分として数えます。追加の水は「普通の水」で記録します。</span></div>
+          <div class="field"><label>バランスリキッド量 (ml)</label><input name="balanceAmount" type="number" min="1" max="10000" step="1" value="${s.foods.balanceLiquid.amountMl}" required></div>
+          <div class="field"><label>セットに含む追加水 (ml)</label><input name="balanceAddedWater" type="number" min="0" max="10000" step="1" value="${s.foods.balanceLiquid.addedWaterMl || 0}" required><span class="field-help">通常セットの管理水分は両方の合計です。</span></div>
         </div>
       </section>
       <section class="settings-section">
@@ -423,7 +585,7 @@ function renderSettings() {
       <section class="settings-section">
         <h3>スケジュール</h3>
         <div class="field-grid">
-          <div class="field full"><label>バランスリキッド予定（カンマ区切り）</label><input name="regularTimes" value="${escapeHtml(s.regularSlotTimes.join(", "))}" required></div>
+          <div class="field full"><label>通常セット予定（カンマ区切り）</label><input name="regularTimes" value="${escapeHtml(s.regularSlotTimes.join(", "))}" required></div>
           <div class="field"><label>調整枠</label><input name="adjustmentTime" type="time" value="${s.adjustmentSlotTime}" required></div>
         </div>
       </section>
@@ -431,15 +593,18 @@ function renderSettings() {
       <div class="button-row"><button type="submit" class="button" value="future">明日以降に適用</button><button type="submit" class="button primary" value="today">今日にも適用</button></div>
     </form>
 
+    ${careSettingsHtml()}
     ${syncSettingsHtml()}
     <div class="section-heading"><h3>データ管理</h3></div>
     <section class="settings-section">
       <div class="data-actions">
-        <button type="button" class="button" data-export="json">JSONバックアップ</button>
-        <label class="file-label">JSONを取込<input id="import-json" type="file" accept="application/json,.json"></label>
+        <button type="button" class="button" data-export="json">食事JSONバックアップ</button>
+        <label class="file-label">食事JSONを取込<input id="import-json" type="file" accept="application/json,.json"></label>
+        <button type="button" class="button" data-export="care-json" ${careView.ready ? "" : "disabled"}>介護JSON（閲覧用）</button>
         <button type="button" class="button" data-export="summary-csv">日次CSV</button>
         <button type="button" class="button" data-export="events-csv">明細CSV</button>
       </div>
+      <p class="field-help">食事JSONはこの画面から取込み可能です。介護JSONは排泄・点眼の控えで、この画面からの復元には対応していません。</p>
       <div class="button-row"><button type="button" class="button ghost-danger" data-action="clear-data">${syncView.connected ? "この端末を家族データから再読込み" : "全データを消去"}</button></div>
     </section>`;
 }
@@ -447,7 +612,7 @@ function renderSettings() {
 function parseTimes(value, allowEmpty = false) {
   const times = value.split(",").map((time) => time.trim()).filter(Boolean);
   if (!allowEmpty && !times.length) throw new Error("時刻を1件以上入力してください");
-  if (times.some((time) => !/^([01]\d|2[0-3]):[0-5]\d$/.test(time))) throw new Error("時刻は HH:MM 形式で入力してください");
+  if (times.some((time) => !new RegExp("^([01]\\d|2[0-3]):[0-5]\\d$").test(time))) throw new Error("時刻は HH:MM 形式で入力してください");
   return [...new Set(times)].sort();
 }
 
@@ -463,7 +628,8 @@ function settingsFromForm(form) {
   next.waterLimitMl = integer("waterLimit");
   next.foods.balanceLiquid.caloriesTenthKcal = tenth("balanceCalories");
   next.foods.balanceLiquid.amountMl = integer("balanceAmount");
-  next.foods.balanceLiquid.countedWaterMl = next.foods.balanceLiquid.amountMl;
+  next.foods.balanceLiquid.addedWaterMl = integer("balanceAddedWater");
+  next.foods.balanceLiquid.countedWaterMl = next.foods.balanceLiquid.amountMl + next.foods.balanceLiquid.addedWaterMl;
   next.foods.chickenMeal.caloriesTenthKcal = tenth("chickenCalories");
   next.foods.chickenMeal.countedWaterMl = integer("chickenWater");
   next.foods.soupSyringe.caloriesTenthKcal = tenth("soupCalories");
@@ -474,7 +640,7 @@ function settingsFromForm(form) {
   next.medicine.scheduledTimes = ["06:00", "12:00"];
   next.regularSlotTimes = parseTimes(String(data.get("regularTimes") || ""));
   next.adjustmentSlotTime = String(data.get("adjustmentTime"));
-  const numericValues = [next.calorieTargetTenthKcal, next.waterLimitMl, next.foods.balanceLiquid.caloriesTenthKcal, next.foods.balanceLiquid.amountMl, next.medicine.doseMl, next.medicine.dosesPerDay];
+  const numericValues = [next.calorieTargetTenthKcal, next.waterLimitMl, next.foods.balanceLiquid.caloriesTenthKcal, next.foods.balanceLiquid.amountMl, next.foods.balanceLiquid.addedWaterMl, next.medicine.doseMl, next.medicine.dosesPerDay];
   if (numericValues.some((value) => !Number.isFinite(value) || value < 0)) throw new Error("数値設定を確認してください");
   return next;
 }
@@ -499,11 +665,15 @@ async function recordBalanceLiquid(slotId = null) {
     showToast(`${slot.scheduledTime}枠はすでに記録されています`);
     return;
   }
-  const event = createEvent(day, "BALANCE_LIQUID", new Date().toISOString(), { linkedSlotId: slot?.id });
+  const before = summarizeDay(day);
+  const afterWater = before.projectedCommittedWaterMl + day.settingsSnapshot.foods.balanceLiquid.countedWaterMl;
+  if (afterWater > day.settingsSnapshot.waterLimitMl
+      && !window.confirm(`この通常セットを記録すると、未投与の薬を含む見込み水分が${afterWater} mlとなり、上限を超えます。すでに与えた事実として記録しますか？`)) return;
+  const event = createEvent(day, "BALANCE_LIQUID", new Date().toISOString(), { linkedSlotId: slot?.id, ...actorFields() });
   day.events.push(event);
   recalculatePlan(day, new Date(), reasonForType("BALANCE_LIQUID"), true);
   await commit();
-  const label = slot ? `${slot.scheduledTime}枠のバランスリキッド` : "バランスリキッド";
+  const label = slot ? `${slot.scheduledTime}枠の通常セット` : "通常セット";
   showToast(`${label}を記録しました`, async () => {
     event.status = "VOIDED";
     event.voidReason = "直前操作を取り消し";
@@ -530,7 +700,7 @@ function openSimpleAmountDialog(type) {
       ? { caloriesTenthKcal: 0, countedWaterMl: Math.round(amount) }
       : { caloriesTenthKcal: Math.round(amount * 10), countedWaterMl: 0 };
     const day = currentDay();
-    const event = createEvent(day, type, new Date().toISOString(), options);
+    const event = createEvent(day, type, new Date().toISOString(), { ...options, ...actorFields() });
     day.events.push(event);
     recalculatePlan(day, new Date(), reasonForType(type), true);
     await commit();
@@ -591,7 +761,7 @@ function openRecordDialog(type, slotId = null, requestedMedicineTime = null) {
   pendingDialogAction = async (form) => {
     const occurredInput = form.elements.occurredAt.value;
     const occurredAt = new Date(occurredInput).toISOString();
-    const event = createEvent(day, type, occurredAt, { linkedSlotId: slotId, note: form.elements.note.value });
+    const event = createEvent(day, type, occurredAt, { linkedSlotId: slotId, note: form.elements.note.value, ...actorFields() });
     if (medicineTime) event.medicineScheduledTime = medicineTime;
     day.events.push(event);
     recalculatePlan(day, new Date(), reasonForType(type), true);
@@ -714,6 +884,15 @@ actionForm.addEventListener("submit", (event) => {
   });
 });
 
+async function runCareMutation(action, successMessage) {
+  try {
+    await action();
+    if (successMessage) showToast(successMessage);
+  } catch (error) {
+    showToast(error.message || "介護データを更新できませんでした");
+  }
+}
+
 document.addEventListener("click", (event) => {
   const target = event.target.closest("button, [data-route]");
   if (!target) return;
@@ -722,6 +901,32 @@ document.addEventListener("click", (event) => {
     selectedHistoryDayId = null;
     renderApp();
     window.scrollTo({ top: 0, behavior: "smooth" });
+    return;
+  }
+  if (target.dataset.health) {
+    const type = target.dataset.health;
+    withMutationLock(() => runCareMutation(async () => {
+      const id = await careFeatures.recordHealth(type);
+      showToast(`${type === "urine" ? "小" : "大"}を${displayTime(new Date().toISOString(), state.settings.timezone)}に記録しました`,
+        () => runCareMutation(() => careFeatures.voidHealth(id), "排泄記録を取り消しました"));
+    }));
+    return;
+  }
+  if (target.dataset.eyeClaim) {
+    withMutationLock(() => runCareMutation(async () => {
+      if (!careView.notificationPreferences?.master_enabled
+          && !window.confirm("通知がOFFです。画面上のタイマーは使えますが、バックグラウンド通知は届きません。この回を担当しますか？")) return;
+      await careFeatures.claimSession(target.dataset.eyeClaim);
+    }, "点眼の担当になりました"));
+    return;
+  }
+  if (target.dataset.eyeComplete) {
+    withMutationLock(() => runCareMutation(() => careFeatures.completeStep(target.dataset.eyeComplete), "点眼を記録しました"));
+    return;
+  }
+  if (target.dataset.eyeTakeover) {
+    if (!window.confirm("現在の担当者からこの点眼セッションを引き継ぎますか？")) return;
+    withMutationLock(() => runCareMutation(() => careFeatures.takeoverSession(target.dataset.eyeTakeover), "点眼担当を引き継ぎました"));
     return;
   }
   if (target.dataset.record) {
@@ -755,7 +960,10 @@ document.addEventListener("click", (event) => {
     window.scrollTo({ top: 0, behavior: "smooth" });
     return;
   }
-  if (target.dataset.export) exportData(target.dataset.export);
+  if (target.dataset.export) {
+    exportData(target.dataset.export).catch((error) => showToast(error.message || "データを出力できませんでした"));
+    return;
+  }
   switch (target.dataset.action) {
     case "close-dialog": closeDialog(); break;
     case "void-event": withMutationLock(() => changeEventVoidState(false)); break;
@@ -775,6 +983,7 @@ document.addEventListener("click", (event) => {
       try { localStorage.setItem("dogcare-install-help-dismissed", "1"); } catch { /* no-op */ }
       renderToday();
       break;
+    case "enable-push": withMutationLock(() => runCareMutation(() => careFeatures.enablePush(), "この端末の通知を有効にしました")); break;
   }
 });
 
@@ -793,12 +1002,58 @@ document.addEventListener("submit", (event) => {
     if (!event.target.reportValidity()) return;
     withMutationLock(async () => {
       try {
+        pendingDisplayName = event.target.elements.displayName.value.trim();
         await familySync.joinFamily(event.target.elements.invite.value);
+        await careFeatures.initialize(pendingDisplayName);
+        pendingDisplayName = "";
         showToast("家族データに参加しました。次回から自動で同期します。");
       } catch (error) {
         showToast(error.message || "招待URLを確認できませんでした");
       }
     });
+    return;
+  }
+  if (event.target.id === "care-profile-form") {
+    event.preventDefault();
+    if (!event.target.reportValidity()) return;
+    withMutationLock(() => runCareMutation(async () => {
+      await careFeatures.saveDisplayName(event.target.elements.displayName.value);
+      await careFeatures.saveNotificationPreferences({
+        master_enabled: event.target.elements.master.checked,
+        scheduled_eye_drop_enabled: event.target.elements.scheduled.checked,
+        active_eye_drop_timer_enabled: event.target.elements.timer.checked
+      });
+    }, "個人設定を保存しました"));
+    return;
+  }
+  if (event.target.id === "eye-settings-form") {
+    event.preventDefault();
+    if (!event.target.reportValidity()) return;
+    withMutationLock(() => runCareMutation(async () => {
+      const dropTypes = event.target.elements.dropTypes.value.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => {
+        const [id, name, required] = line.split("|").map((part) => part.trim());
+        if (!id || !name || !new RegExp("^\\d+$").test(required || "")) throw new Error("点眼薬は ID|表示名|1日必要回数 の形式で入力してください");
+        return { id, name, requiredDailyCount: Number(required) };
+      });
+      const idByName = new Map(dropTypes.map((item) => [item.name, item.id]));
+      const enteredTemplates = event.target.elements.templates.value.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => {
+        const separator = line.indexOf("=");
+        if (separator < 0) throw new Error("時刻別スケジュールは HH:MM=点眼名,点眼名 の形式で入力してください");
+        const time = line.slice(0, separator).trim();
+        if (!EYE_DROP_TIMES.includes(time)) throw new Error(`${time}は使用できない点眼時刻です`);
+        const names = line.slice(separator + 1).split(",").map((name) => name.trim()).filter(Boolean);
+        return { time, steps: names.map((name) => {
+          const id = idByName.get(name);
+          if (!id) throw new Error(`${time}の「${name}」は点眼薬一覧にありません`);
+          return id;
+        }) };
+      });
+      const byTime = new Map(enteredTemplates.map((item) => [item.time, item]));
+      const templates = EYE_DROP_TIMES.map((time) => byTime.get(time) || { time, steps: [] });
+      const validation = validateEyeDropSettings(dropTypes, templates);
+      if (validation.countWarnings.length && !window.confirm(`${validation.countWarnings.join("\n")}\n\n必要回数と予定回数が一致していません。このまま翌日以降へ保存しますか？`)) return;
+      await careFeatures.saveEyeDropSettings(dropTypes, templates, Number(event.target.elements.intervalMinutes.value) * 60);
+    }, "翌日以降の点眼設定を保存しました"));
     return;
   }
   if (event.target.id !== "settings-form") return;
@@ -862,24 +1117,34 @@ function csvCell(value) {
   return `"${string.replaceAll('"', '""')}"`;
 }
 
-function exportData(kind) {
+async function exportData(kind) {
   const stamp = localDateInTimezone(new Date(), state.settings.timezone);
   if (kind === "json") {
     download(`inu-care-backup-${stamp}.json`, JSON.stringify(state, null, 2), "application/json;charset=utf-8");
     showToast("JSONバックアップを出力しました");
     return;
   }
+  if (kind === "care-json") {
+    if (!careView.ready) {
+      showToast("介護データの同期後に出力してください");
+      return;
+    }
+    const careBackup = await careFeatures.exportCareData();
+    download(`inu-care-care-data-${stamp}.json`, JSON.stringify(careBackup, null, 2), "application/json;charset=utf-8");
+    showToast("介護データの閲覧用JSONを出力しました");
+    return;
+  }
   let rows;
   if (kind === "summary-csv") {
-    rows = [["日付", "犬の名前", "カロリー(kcal)", "実績水分(ml)", "薬回数", "鶏ごはん回数", "バランスリキッド回数", "メモ"]];
+    rows = [["日付", "犬の名前", "カロリー(kcal)", "実績水分(ml)", "薬回数", "鶏ごはん回数", "通常セット回数", "メモ"]];
     [...state.days].sort((a, b) => a.localDate.localeCompare(b.localDate)).forEach((day) => {
       const s = summarizeDay(day);
       rows.push([day.localDate, day.settingsSnapshot.dogName || "", formatKcal(s.actualCaloriesTenthKcal), s.actualWaterMl, s.completedMedicineDoses, s.chickenMealCount, s.completedBalanceLiquidDoses, day.note || ""]);
     });
   } else {
-    rows = [["日付", "実績ID", "種別", "記録時刻", "カロリー(kcal)", "管理水分(ml)", "状態", "メモ", "取消し理由"]];
+    rows = [["日付", "実績ID", "種別", "記録時刻", "記録者", "カロリー(kcal)", "管理水分(ml)", "状態", "メモ", "取消し理由"]];
     [...state.days].sort((a, b) => a.localDate.localeCompare(b.localDate)).forEach((day) => day.events.forEach((item) => {
-      rows.push([day.localDate, item.id, EVENT_LABELS[item.type] || item.type, item.occurredAt, formatKcal(item.caloriesTenthKcal), item.countedWaterMl, item.status, item.note || "", item.voidReason || ""]);
+      rows.push([day.localDate, item.id, EVENT_LABELS[item.type] || item.type, item.occurredAt, item.recordedByName || "", formatKcal(item.caloriesTenthKcal), item.countedWaterMl, item.status, item.note || "", item.voidReason || ""]);
     }));
   }
   const csv = `\ufeff${rows.map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
@@ -888,7 +1153,7 @@ function exportData(kind) {
 }
 
 function validateImportedState(candidate) {
-  if (!candidate || ![1, 2, SCHEMA_VERSION].includes(candidate.schemaVersion) || !candidate.settings || !Array.isArray(candidate.days)) throw new Error("対応していないバックアップ形式です");
+  if (!candidate || ![1, 2, 3, SCHEMA_VERSION].includes(candidate.schemaVersion) || !candidate.settings || !Array.isArray(candidate.days)) throw new Error("対応していないバックアップ形式です");
   for (const day of candidate.days) {
     if (!day.id || !day.localDate || !day.settingsSnapshot || !Array.isArray(day.events) || !Array.isArray(day.slots)) throw new Error("日別データの形式が正しくありません");
   }
@@ -943,8 +1208,16 @@ async function clearAllData() {
 async function startFamilySync() {
   const confirmed = window.confirm("この端末の現在の記録を、家族で共有する最初のデータとして登録します。続けますか？");
   if (!confirmed) return;
+  const displayName = window.prompt("家族に表示するあなたの名前を入力してください", careView.profile?.display_name || "自分");
+  if (!displayName?.trim()) {
+    showToast("表示名が未入力のため開始しませんでした");
+    return;
+  }
   try {
+    pendingDisplayName = displayName.trim();
     const inviteUrl = await familySync.startFamily();
+    await careFeatures.initialize(pendingDisplayName);
+    pendingDisplayName = "";
     renderSettings();
     showToast("家族同期を開始しました。次に招待URLを家族へ送ってください。");
     if (inviteUrl && navigator.clipboard?.writeText) await navigator.clipboard.writeText(inviteUrl).catch(() => {});
@@ -969,7 +1242,7 @@ function migrateState(loaded) {
 }
 
 function normalizeLoadedState(loaded) {
-  if (!loaded || ![1, 2, SCHEMA_VERSION].includes(loaded.schemaVersion) || !loaded.settings || !Array.isArray(loaded.days)) return createInitialState();
+  if (!loaded || ![1, 2, 3, SCHEMA_VERSION].includes(loaded.schemaVersion) || !loaded.settings || !Array.isArray(loaded.days)) return createInitialState();
   migrateState(loaded);
   loaded.days.forEach((day) => {
     day.events ||= [];
@@ -1006,6 +1279,15 @@ async function init() {
     console.error(error);
   }
   ensureToday();
+  careFeatures = createCareFeatures({
+    timezone: () => state.settings.timezone,
+    localDate: () => localDateInTimezone(new Date(), state.settings.timezone),
+    onChange: (nextCareView) => {
+      careView = nextCareView;
+      if (state) renderApp();
+    },
+    onMessage: (message) => showToast(message)
+  });
   familySync = createFamilySync({
     getState: () => state,
     applyState: async (nextState) => {
@@ -1018,6 +1300,7 @@ async function init() {
     onStatus: (nextStatus) => {
       syncView = nextStatus;
       setSaveStatus(nextStatus.message, nextStatus.error);
+      if (nextStatus.connected) careFeatures.initialize(pendingDisplayName);
       if (state && route === "settings") renderSettings();
       if (state && route === "today") renderToday();
     },
@@ -1035,8 +1318,15 @@ async function init() {
       renderToday();
       persist();
       familySync.pull();
+      if (careView.ready) careFeatures.reload().catch(() => {});
     }
   });
+  setInterval(() => {
+    if (!document.hidden && careView.ready && currentEyeSessions().some((session) => session.status === "in_progress")) {
+      if (route === "today") renderToday();
+      if (route === "eyedrops") renderEyeDrops();
+    }
+  }, 1000);
 }
 
 init();

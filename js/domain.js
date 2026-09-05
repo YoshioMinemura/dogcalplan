@@ -38,28 +38,41 @@ export function createInitialState() {
   };
 }
 
-export function migrateSettingsToCurrent(settings) {
+export function migrateSettingsToCurrent(settings, { futureSettings = false, sourceSchemaVersion = settings?.schemaVersion || 1 } = {}) {
   if (!settings) return settings;
   settings.foods ||= {};
   if (!settings.foods.balanceLiquid) {
     const old = settings.foods.normalSet || {};
     const amountMl = Number.isFinite(old.balanceLiquidMl) ? old.balanceLiquidMl : 18;
     settings.foods.balanceLiquid = {
-      name: "バランスリキッド",
+      name: futureSettings ? "通常セット" : (old.name || "通常セット"),
       amountMl,
+      addedWaterMl: Number.isFinite(old.addedWaterMl) ? old.addedWaterMl : 0,
       caloriesTenthKcal: Number.isFinite(old.caloriesTenthKcal) ? old.caloriesTenthKcal : 240,
-      countedWaterMl: amountMl,
+      countedWaterMl: Number.isFinite(old.countedWaterMl) ? old.countedWaterMl : amountMl,
       indivisible: true
     };
   }
-  settings.foods.balanceLiquid.name = "バランスリキッド";
+  settings.foods.balanceLiquid.name ||= futureSettings ? "通常セット" : "バランスリキッド";
   const migratedAmountMl = Number.isFinite(settings.foods.balanceLiquid.amountMl)
     ? settings.foods.balanceLiquid.amountMl
     : settings.foods.balanceLiquid.countedWaterMl;
   settings.foods.balanceLiquid.amountMl = Number.isFinite(migratedAmountMl) && migratedAmountMl > 0
     ? migratedAmountMl
     : 18;
-  settings.foods.balanceLiquid.countedWaterMl = settings.foods.balanceLiquid.amountMl;
+  if (!Number.isFinite(settings.foods.balanceLiquid.countedWaterMl)) {
+    settings.foods.balanceLiquid.countedWaterMl = settings.foods.balanceLiquid.amountMl;
+  }
+  if (futureSettings && sourceSchemaVersion < 4
+      && settings.foods.balanceLiquid.amountMl === 18
+      && settings.foods.balanceLiquid.countedWaterMl === 18) {
+    settings.foods.balanceLiquid.name = "通常セット";
+    settings.foods.balanceLiquid.addedWaterMl = 5;
+    settings.foods.balanceLiquid.countedWaterMl = 23;
+  } else if (!Number.isFinite(settings.foods.balanceLiquid.addedWaterMl)) {
+    settings.foods.balanceLiquid.addedWaterMl = Math.max(0,
+      settings.foods.balanceLiquid.countedWaterMl - settings.foods.balanceLiquid.amountMl);
+  }
   settings.schemaVersion = SCHEMA_VERSION;
   delete settings.foods.normalSet;
   if (settings.medicine) {
@@ -71,13 +84,14 @@ export function migrateSettingsToCurrent(settings) {
 }
 
 export function migrateStateToCurrent(loaded) {
+  const sourceSchemaVersion = loaded.schemaVersion || 1;
   loaded.schemaVersion = SCHEMA_VERSION;
-  migrateSettingsToCurrent(loaded.settings);
+  migrateSettingsToCurrent(loaded.settings, { futureSettings: true, sourceSchemaVersion });
   for (const day of loaded.days || []) {
-    migrateSettingsToCurrent(day.settingsSnapshot);
+    migrateSettingsToCurrent(day.settingsSnapshot, { futureSettings: false, sourceSchemaVersion });
     for (const slot of day.slots || []) {
       if (slot.plannedType === "NORMAL_SET") slot.plannedType = "BALANCE_LIQUID";
-      if (slot.changeReason) slot.changeReason = slot.changeReason.replaceAll("通常セット", "バランスリキッド");
+      if (slot.changeReason) slot.changeReason = slot.changeReason.replaceAll("バランスリキッド", "通常セット");
     }
     for (const event of day.events || []) {
       if (event.type === "NORMAL_SET") {
@@ -86,7 +100,7 @@ export function migrateStateToCurrent(loaded) {
       }
     }
     for (const revision of day.planRevisions || []) {
-      if (revision.reason) revision.reason = revision.reason.replaceAll("通常セット", "バランスリキッド");
+      if (revision.reason) revision.reason = revision.reason.replaceAll("バランスリキッド", "通常セット");
     }
   }
   return loaded;
@@ -152,6 +166,8 @@ export function createEvent(day, type, occurredAt, options = {}) {
   return {
     id: uid("event"), dayId: day.id, type, occurredAt,
     linkedSlotId: options.linkedSlotId || undefined,
+    recordedByUserId: options.recordedByUserId || undefined,
+    recordedByName: options.recordedByName || undefined,
     ...nutrition, quantity: 1, note: options.note?.trim() || "",
     status: "ACTIVE", createdAt: stamp, updatedAt: stamp
   };
@@ -317,7 +333,7 @@ export function buildWarnings(day, summary, now = new Date()) {
       level: "info",
       title: "目標まで届かない見込みです",
       message: waterBlocked
-        ? `見込みは ${formatKcal(summary.predictedCaloriesTenthKcal)} kcal。目標まで ${formatKcal(shortage)} kcalですが、水分上限のためバランスリキッドを追加しません。`
+        ? `見込みは ${formatKcal(summary.predictedCaloriesTenthKcal)} kcal。目標まで ${formatKcal(shortage)} kcalですが、水分上限のため通常セットを追加しません。`
         : `見込みは ${formatKcal(summary.predictedCaloriesTenthKcal)} kcal。残り時間枠では目標に到達できません。`
     });
   }
@@ -348,5 +364,5 @@ export function formatDateJa(localDate, includeYear = false) {
 }
 
 export function reasonForType(type) {
-  return ({ BALANCE_LIQUID: "バランスリキッド完了", PLAIN_WATER: "飲水記録", SOLID_FOOD: "固形食摂取", CHICKEN_MEAL: "鶏ごはん摂取", VOMIT_BUSTER: "薬記録", SOUP_SYRINGE: "スープ缶記録" })[type] || "実績編集";
+  return ({ BALANCE_LIQUID: "通常セット完了", PLAIN_WATER: "飲水記録", SOLID_FOOD: "固形食摂取", CHICKEN_MEAL: "鶏ごはん摂取", VOMIT_BUSTER: "薬記録", SOUP_SYRINGE: "スープ缶記録" })[type] || "実績編集";
 }

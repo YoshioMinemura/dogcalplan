@@ -1,0 +1,5 @@
+project_id = "dogcalplan"
+
+[functions.dispatch-notifications]
+verify_jwt = false
+entrypoint = "./functions/dispatch-notifications/index.ts"
