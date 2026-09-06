@@ -1,6 +1,6 @@
 # べぬケアごはん 運用開始手順書
 
-更新日: 2026-09-05
+更新日: 2026-09-06
 
 この手順書は、2026-09-05追加の通常セット、排泄、点眼、Web Pushを本番の家族端末で使い始めるまでの作業を、実施順にまとめたものです。本番DBへのSQL実行、秘密情報の登録、GitHubへのpushは利用者が行います。
 
@@ -310,3 +310,17 @@ iPhone/iPadでWeb Pushを使う場合は、Safariから先にホーム画面へ�
 - 実環境で不明なエラーが出たら、発生時刻、端末、画面、操作、Edge Function／Supabaseログを控えてから修正を依頼してください。
 
 参考: [Supabase Edge Functionsのデプロイ](https://supabase.com/docs/guides/functions/deploy)、[Edge FunctionのSecrets](https://supabase.com/docs/guides/functions/secrets)、[CronによるFunction呼出し](https://supabase.com/docs/guides/functions/schedule-functions)、[web-push](https://github.com/web-push-libs/web-push)
+
+## 13. 2026-09-06版への更新
+
+この版の本番適用・公開はまだ行っていません。既存の食事JSONと介護JSONを退避後、次の順で更新します。
+
+1. SQL Editorで[`202609060001_edit_health_event_time.sql`](../supabase/migrations/202609060001_edit_health_event_time.sql)を実行します。既存2本の介護migrationは適用済みのまま保持します。
+2. ローカルで`tests.html`と`git diff --check`を確認し、コードをレビュー後にcommit・pushしてPagesの公開を待ちます。
+3. 全端末のアプリを再起動し、キャッシュv7と5つのメニューを確認します。旧端末のアプリも更新してから同時操作試験を行います。
+4. 犬の名前、バランスリキッド表示、薬の2時刻、固形食の3単位、スープのml換算、入力・編集時刻を確認します。
+5. 2端末で編集中の同期、スキップの保持と解除、送信中の追加入力、オフライン復帰を確認します。
+6. 排泄時刻を片方で編集し、他方と日別排泄履歴に反映することを確認します。同じ排泄を同時編集した場合は後の保存が拒否されることを確認します。
+7. 食事・排泄・点眼の各履歴が分離され、古い日の介護履歴も取得できることを確認します。既存の点眼排他・5分制約・Pushも実機で再確認します。
+
+この変更でVAPID・Cron・Edge Functionの再設定は不要です。排泄編集RPCの適用前は時刻編集がエラーになるため、追加migrationを先に適用します。水分量は名称変更で変えず、標準23 mlを維持します。

@@ -73,11 +73,21 @@ export function migrateSettingsToCurrent(settings, { futureSettings = false, sou
     settings.foods.balanceLiquid.addedWaterMl = Math.max(0,
       settings.foods.balanceLiquid.countedWaterMl - settings.foods.balanceLiquid.amountMl);
   }
+  if (sourceSchemaVersion < 5 && ["通常セット", "バランスリキッド"].includes(settings.foods.balanceLiquid.name)) {
+    settings.foods.balanceLiquid.name = "バランスリキッド";
+  }
+  if (futureSettings && sourceSchemaVersion < 5) {
+    settings.foods.soupSyringe = { ...settings.foods.soupSyringe, caloriesTenthKcal: 75, countedWaterMl: 15 };
+  }
   settings.schemaVersion = SCHEMA_VERSION;
   delete settings.foods.normalSet;
   if (settings.medicine) {
     settings.medicine.dosesPerDay = 2;
-    settings.medicine.scheduledTimes = ["06:00", "12:00"];
+    const times = settings.medicine.scheduledTimes;
+    if (!Array.isArray(times) || times.length !== 2 || new Set(times).size !== 2
+        || times.some((time) => !/^([01]\d|2[0-3]):[0-5]\d$/.test(time))) {
+      settings.medicine.scheduledTimes = ["06:00", "12:00"];
+    }
     delete settings.medicine.optionalScheduledTimes;
   }
   return settings;
@@ -90,8 +100,11 @@ export function migrateStateToCurrent(loaded) {
   for (const day of loaded.days || []) {
     migrateSettingsToCurrent(day.settingsSnapshot, { futureSettings: false, sourceSchemaVersion });
     for (const slot of day.slots || []) {
+      if (!slot.manualState && ["SKIPPED", "FAILED"].includes(slot.status)) {
+        slot.manualState = { status: slot.status, reason: slot.changeReason || "", updatedAt: slot.updatedAt || day.updatedAt };
+      }
       if (slot.plannedType === "NORMAL_SET") slot.plannedType = "BALANCE_LIQUID";
-      if (slot.changeReason) slot.changeReason = slot.changeReason.replaceAll("バランスリキッド", "通常セット");
+      if (slot.changeReason) slot.changeReason = slot.changeReason.replaceAll("通常セット", "バランスリキッド");
     }
     for (const event of day.events || []) {
       if (event.type === "NORMAL_SET") {
@@ -100,7 +113,7 @@ export function migrateStateToCurrent(loaded) {
       }
     }
     for (const revision of day.planRevisions || []) {
-      if (revision.reason) revision.reason = revision.reason.replaceAll("バランスリキッド", "通常セット");
+      if (revision.reason) revision.reason = revision.reason.replaceAll("通常セット", "バランスリキッド");
     }
   }
   return loaded;
@@ -168,6 +181,7 @@ export function createEvent(day, type, occurredAt, options = {}) {
     linkedSlotId: options.linkedSlotId || undefined,
     recordedByUserId: options.recordedByUserId || undefined,
     recordedByName: options.recordedByName || undefined,
+    inputAmount: options.inputAmount, inputUnit: options.inputUnit,
     ...nutrition, quantity: 1, note: options.note?.trim() || "",
     status: "ACTIVE", createdAt: stamp, updatedAt: stamp
   };
@@ -199,8 +213,9 @@ export function medicineSchedule(day) {
     .sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
   const assigned = new Map();
   for (const event of activeEvents) {
-    if (scheduledTimes.includes(event.medicineScheduledTime) && !assigned.has(event.medicineScheduledTime)) {
-      assigned.set(event.medicineScheduledTime, event);
+    const time = Number.isInteger(event.medicineDoseIndex) ? scheduledTimes[event.medicineDoseIndex] : event.medicineScheduledTime;
+    if (scheduledTimes.includes(time) && !assigned.has(time)) {
+      assigned.set(time, event);
     }
   }
   for (const event of activeEvents) {
@@ -248,6 +263,12 @@ export function recalculatePlan(day, now = new Date(), reason = "再計算", rec
   const terminal = new Set(["SKIPPED", "FAILED"]);
 
   for (const slot of day.slots) {
+    if (slot.manualState) {
+      if (slot.manualState.status) {
+        slot.status = slot.manualState.status;
+        slot.changeReason = slot.manualState.reason;
+      } else if (terminal.has(slot.status)) slot.status = "PLANNED";
+    }
     if (activeLinkedIds.has(slot.id)) {
       slot.status = "COMPLETED";
       slot.linkedEventId = day.events.find((event) => event.status === "ACTIVE" && event.linkedSlotId === slot.id)?.id;
@@ -310,7 +331,7 @@ export function recalculatePlan(day, now = new Date(), reason = "再計算", rec
     dosesAllowedBySlots, recommendedRemainingDoses, predictedCaloriesTenthKcal,
     predictedWaterMl, calorieReachable, waterSafe
   }, now);
-  day.updatedAt = stamp;
+  if (recordRevision) day.updatedAt = stamp;
   return {
     ...summary, remainingCalories, dosesNeededForCalories, dosesAllowedByWater,
     dosesAllowedBySlots, recommendedRemainingDoses, predictedCaloriesTenthKcal,
@@ -333,7 +354,7 @@ export function buildWarnings(day, summary, now = new Date()) {
       level: "info",
       title: "目標まで届かない見込みです",
       message: waterBlocked
-        ? `見込みは ${formatKcal(summary.predictedCaloriesTenthKcal)} kcal。目標まで ${formatKcal(shortage)} kcalですが、水分上限のため通常セットを追加しません。`
+        ? `見込みは ${formatKcal(summary.predictedCaloriesTenthKcal)} kcal。目標まで ${formatKcal(shortage)} kcalですが、水分上限のためバランスリキッドを追加しません。`
         : `見込みは ${formatKcal(summary.predictedCaloriesTenthKcal)} kcal。残り時間枠では目標に到達できません。`
     });
   }
@@ -364,5 +385,27 @@ export function formatDateJa(localDate, includeYear = false) {
 }
 
 export function reasonForType(type) {
-  return ({ BALANCE_LIQUID: "通常セット完了", PLAIN_WATER: "飲水記録", SOLID_FOOD: "固形食摂取", CHICKEN_MEAL: "鶏ごはん摂取", VOMIT_BUSTER: "薬記録", SOUP_SYRINGE: "スープ缶記録" })[type] || "実績編集";
+  return ({ BALANCE_LIQUID: "バランスリキッド完了", PLAIN_WATER: "飲水記録", SOLID_FOOD: "固形食摂取", CHICKEN_MEAL: "鶏ごはん摂取", VOMIT_BUSTER: "薬記録", SOUP_SYRINGE: "スープ缶記録" })[type] || "実績編集";
+}
+
+// User input conversions round once into the stored 0.1 kcal integer unit.
+export function solidFoodNutrition(amount, unit = "kcal") {
+  if (!Number.isFinite(amount) || amount <= 0 || !["kcal", "g", "pieces"].includes(unit)) throw new Error("固形食の量を確認してください");
+  if (unit === "pieces" && !Number.isInteger(amount)) throw new Error("粒数は整数で入力してください");
+  const caloriesTenthKcal = Math.round(amount * (unit === "g" ? 29 : unit === "pieces" ? 290 / 54 : 10));
+  if (caloriesTenthKcal < 1 || caloriesTenthKcal > 50000) throw new Error("カロリーは0.1〜5000 kcalの範囲で入力してください");
+  return { caloriesTenthKcal, countedWaterMl: 0, inputAmount: amount, inputUnit: unit };
+}
+
+export function soupNutrition(ml) {
+  if (!Number.isFinite(ml) || ml <= 0 || ml > 10000) throw new Error("スープ缶の量を確認してください");
+  return { caloriesTenthKcal: Math.round(ml * 5), countedWaterMl: ml };
+}
+
+export function setSlotManualState(slot, status, reason, stamp = new Date().toISOString()) {
+  slot.manualState = { status, reason, updatedAt: stamp };
+  slot.status = status || "PLANNED";
+  slot.changeReason = reason;
+  slot.updatedAt = stamp;
+  slot.revision += 1;
 }

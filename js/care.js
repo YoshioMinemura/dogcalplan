@@ -1,4 +1,5 @@
 import { getSupabaseClient } from "./supabase-client.js";
+import { localDateInTimezone } from "./domain.js";
 import { VAPID_PUBLIC_KEY } from "./push-config.js";
 
 export const EYE_DROP_TIMES = ["06:00", "08:00", "10:00", "12:00", "14:00", "16:00", "18:00", "20:00", "22:00"];
@@ -77,6 +78,7 @@ export function createCareFeatures({ timezone, localDate, onChange, onMessage })
     loading: false,
     profile: null,
     healthEvents: [],
+    history: { date: null, healthEvents: [], eyeDropSessions: [], loading: false, error: "" },
     eyeDropSettings: null,
     eyeDropSessions: [],
     notificationPreferences: {
@@ -91,6 +93,45 @@ export function createCareFeatures({ timezone, localDate, onChange, onMessage })
   const requireOnline = () => {
     if (!navigator.onLine) throw new Error("この操作はオンライン接続中に行ってください");
   };
+
+  async function fetchAll(makeQuery) {
+    const rows = [];
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await makeQuery().range(from, from + 999);
+      if (error) throw new Error(friendlyCareError(error));
+      rows.push(...(data || []));
+      if (!data || data.length < 1000) return rows;
+    }
+  }
+
+  let historyRequest = 0;
+  async function loadHistory(date) {
+    requireOnline();
+    if (!householdId || !/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("日付と接続を確認してください");
+    const request = ++historyRequest;
+    state.history = { date, healthEvents: [], eyeDropSessions: [], loading: true, error: "" };
+    emit();
+    try {
+      const base = Date.parse(`${date}T00:00:00Z`);
+      const [healthEvents, eyeDropSessions] = await Promise.all([
+        fetchAll(() => client.from("health_events").select("*").eq("household_id", householdId)
+          .gte("occurred_at", new Date(base - 86400000).toISOString())
+          .lt("occurred_at", new Date(base + 2 * 86400000).toISOString()).order("occurred_at", { ascending: false }).order("id")),
+        fetchAll(() => client.from("eye_drop_sessions").select("*,eye_drop_steps(*)").eq("household_id", householdId)
+          .eq("local_date", date).order("scheduled_time").order("id"))
+      ]);
+      if (request !== historyRequest) return;
+      state.history = { date, loading: false, error: "",
+        healthEvents: healthEvents.filter((item) => localDateInTimezone(new Date(item.occurred_at), timezone()) === date),
+        eyeDropSessions: eyeDropSessions.map((session) => ({ ...session,
+          eye_drop_steps: [...(session.eye_drop_steps || [])].sort((a, b) => a.step_order - b.step_order) })) };
+    } catch (error) {
+      if (request !== historyRequest) return;
+      state.history.loading = false;
+      state.history.error = error.message;
+    }
+    emit();
+  }
 
   async function load() {
     if (!householdId) return;
@@ -115,6 +156,7 @@ export function createCareFeatures({ timezone, localDate, onChange, onMessage })
     if (preferencesResult.data) state.notificationPreferences = preferencesResult.data;
     state.ready = true;
     state.error = "";
+    if (state.history.date) await loadHistory(state.history.date);
     emit();
   }
 
@@ -178,6 +220,9 @@ export function createCareFeatures({ timezone, localDate, onChange, onMessage })
     return id;
   }
 
+  const editHealthTime = (id, occurredAt, updatedAt) => mutate("edit_health_event_time", {
+    p_event_id: id, p_occurred_at: occurredAt, p_expected_updated_at: updatedAt
+  });
   const voidHealth = (id) => mutate("void_health_event", { p_event_id: id });
   const claimSession = (id) => mutate("claim_eye_drop_session", { p_session_id: id });
   const completeStep = (id) => mutate("complete_eye_drop_step", { p_step_id: id });
@@ -290,6 +335,8 @@ export function createCareFeatures({ timezone, localDate, onChange, onMessage })
     initialize,
     reload: load,
     recordHealth,
+    editHealthTime,
+    loadHistory,
     voidHealth,
     claimSession,
     completeStep,

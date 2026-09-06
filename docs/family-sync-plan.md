@@ -304,3 +304,9 @@ Supabase Freeは1週間の非アクティブで停止する可能性があり、
 - Supabase Realtime: https://supabase.com/docs/guides/realtime/subscribing-to-database-changes
 - Supabase Pricing: https://supabase.com/pricing
 - Supabase Backups: https://supabase.com/docs/guides/platform/backups
+
+## 2026-09-06追加更新
+
+ローカル実装はschema5／キャッシュv7。5つの画面と種類別履歴、排泄時刻編集を追加した。本番適用は未実施。追加migration `202609060001_edit_health_event_time.sql`を適用後、Pagesを更新する。VAPID／Cron／Edge Functionは今回変更しない。詳細は運用開始手順書の第13節を参照する。
+
+薬の予定は1日2回を維持して変更可能となった。同期競合の識別は設定時刻と記録された投与回番号を使う。スキップ／失敗／解除の明示操作を保存し、送信中の追加記録も次の送信へ残す。実Supabaseでの2端末確認は未実施。

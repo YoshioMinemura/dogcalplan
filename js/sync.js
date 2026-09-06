@@ -39,7 +39,9 @@ function mergeEntityMaps(remoteItems, localItems, baseItems, key, conflicts, lab
     const localChanged = baseValue && !equal(localValue, baseValue);
     const remoteChanged = baseValue && !equal(remoteValue, baseValue);
     if (localChanged && remoteChanged) conflicts.push(`${label}が別端末でも編集されたため、新しい更新を採用しました。`);
-    merged.push(clone(entityTime(localValue) > entityTime(remoteValue) ? localValue : remoteValue));
+    if (localChanged && !remoteChanged) merged.push(clone(localValue));
+    else if (remoteChanged && !localChanged) merged.push(clone(remoteValue));
+    else merged.push(clone(entityTime(localValue) > entityTime(remoteValue) ? localValue : remoteValue));
   }
   return merged;
 }
@@ -50,7 +52,11 @@ function resolveDuplicateEvents(day, remoteEventIds, conflicts) {
   for (const event of active) {
     let key = null;
     if (["BALANCE_LIQUID", "NORMAL_SET"].includes(event.type) && event.linkedSlotId) key = `slot:${event.linkedSlotId}`;
-    if (event.type === "VOMIT_BUSTER" && event.medicineScheduledTime) key = `medicine:${event.medicineScheduledTime}`;
+    if (event.type === "VOMIT_BUSTER") {
+      const index = event.medicineDoseIndex;
+      const time = Number.isInteger(index) ? day.settingsSnapshot.medicine.scheduledTimes[index] : event.medicineScheduledTime;
+      if (time) key = `medicine:${time}`;
+    }
     if (!key) continue;
     const list = groups.get(key) || [];
     list.push(event);
@@ -68,7 +74,7 @@ function resolveDuplicateEvents(day, remoteEventIds, conflicts) {
       duplicate.voidReason = "同期競合: 別端末で同じ予定を記録済み";
       duplicate.updatedAt = new Date(Math.max(entityTime(duplicate), entityTime(kept))).toISOString();
     }
-    const target = key.startsWith("medicine:") ? `${key.slice(9)}の薬` : "同じ通常セット枠";
+    const target = key.startsWith("medicine:") ? `${key.slice(9)}の薬` : "同じバランスリキッド枠";
     conflicts.push(`${target}が別端末でも記録されていたため、先に同期された1件だけを有効にしました。`);
   }
 }
@@ -90,7 +96,15 @@ function mergeDay(remoteDay, localDay, baseDay, conflicts) {
     `${remoteDay.localDate}の予定枠`
   ).map((slot) => {
     const canonical = remoteSlots.get(`${slot.scheduledTime}|${slot.role}`);
-    return { ...slot, id: canonical?.id || slot.id, dayId: remoteDay.id };
+    const local = localSlots.get(`${slot.scheduledTime}|${slot.role}`);
+    const base = baseSlots.find((item) => item.scheduledTime === slot.scheduledTime && item.role === slot.role);
+    const manualState = chooseValue(canonical?.manualState || null, local?.manualState || null,
+      base ? base.manualState || null : undefined, conflicts, `${slot.scheduledTime}の操作`,
+      entityTime(canonical?.manualState), entityTime(local?.manualState));
+    // With no common base, preserve an explicit operation over derived plan state.
+    const manual = !base && (!canonical?.manualState || !local?.manualState)
+      ? canonical?.manualState || local?.manualState || null : manualState;
+    return { ...slot, manualState: manual, id: canonical?.id || slot.id, dayId: remoteDay.id };
   });
 
   const slotIdByKey = new Map(result.slots.map((slot) => [`${slot.scheduledTime}|${slot.role}`, slot.id]));
@@ -107,7 +121,6 @@ function mergeDay(remoteDay, localDay, baseDay, conflicts) {
   const localEvents = localDay.events.map((event) => canonicalizeEvent(event, "local"));
   const baseEvents = baseDay?.events || [];
   result.events = mergeEntityMaps(remoteEvents, localEvents, baseEvents, (event) => event.id, conflicts, `${remoteDay.localDate}の実績`);
-  resolveDuplicateEvents(result, new Set(remoteEvents.map((event) => event.id)), conflicts);
 
   result.planRevisions = mergeEntityMaps(
     remoteDay.planRevisions,
@@ -126,6 +139,7 @@ function mergeDay(remoteDay, localDay, baseDay, conflicts) {
     entityTime(remoteDay),
     entityTime(localDay)
   );
+  resolveDuplicateEvents(result, new Set(remoteEvents.map((event) => event.id)), conflicts);
   result.timezone = result.settingsSnapshot?.timezone || remoteDay.timezone;
   result.note = chooseValue(
     remoteDay.note || "",
@@ -184,6 +198,7 @@ export function createFamilySync({ getState, applyState, onStatus, onConflict })
   let channel;
   let flushTimer;
   let flushing = false;
+  let pulling = false;
   let metadata = {
     householdId: null,
     revision: 0,
@@ -221,10 +236,10 @@ export function createFamilySync({ getState, applyState, onStatus, onConflict })
   async function acceptSynced(state, revision) {
     metadata.revision = Number(revision);
     metadata.lastSyncedState = clone(state);
-    metadata.pending = false;
+    metadata.pending = !equal(getState(), state);
     metadata.lastSyncedAt = new Date().toISOString();
     await saveMetadata();
-    emit("synced", "家族と同期済み");
+    emit(metadata.pending ? "pending" : "synced", metadata.pending ? "追加の変更を同期待ち…" : "家族と同期済み");
   }
 
   async function reconcile(remoteState, revision) {
@@ -235,6 +250,7 @@ export function createFamilySync({ getState, applyState, onStatus, onConflict })
       onConflict?.(merged.conflicts[0]);
     }
     metadata.revision = Number(revision);
+    metadata.lastSyncedState = clone(remoteState);
     await applyState(merged.state);
     if (equal(merged.state, remoteState)) {
       await acceptSynced(remoteState, revision);
@@ -242,11 +258,12 @@ export function createFamilySync({ getState, applyState, onStatus, onConflict })
     }
     metadata.pending = true;
     await saveMetadata();
-    await flush();
+    scheduleFlush();
   }
 
   async function pull() {
-    if (!metadata.householdId || !navigator.onLine) return;
+    if (pulling || flushing || !metadata.householdId || !navigator.onLine) return;
+    pulling = true;
     try {
       emit("syncing", "家族データを確認中…");
       const remote = await readRemote();
@@ -257,11 +274,14 @@ export function createFamilySync({ getState, applyState, onStatus, onConflict })
       await reconcile(remote.state, remote.revision);
     } catch (error) {
       emit("error", friendlyError(error), true);
+    } finally {
+      pulling = false;
+      if (metadata.pending) scheduleFlush();
     }
   }
 
   async function flush() {
-    if (flushing || !metadata.householdId || !metadata.pending) return;
+    if (flushing || pulling || !metadata.householdId || !metadata.pending) return;
     if (!navigator.onLine) { emit("pending", "オフライン・同期待ち"); return; }
     flushing = true;
     try {
@@ -279,12 +299,13 @@ export function createFamilySync({ getState, applyState, onStatus, onConflict })
         if (result.saved) {
           await acceptSynced(localState, result.current_revision);
         } else {
-          const merged = mergeFamilyStates(result.current_state, localState, metadata.lastSyncedState);
+          const merged = mergeFamilyStates(result.current_state, getState(), metadata.lastSyncedState);
           if (merged.conflicts.length) {
             metadata.conflicts = [...new Set([...metadata.conflicts, ...merged.conflicts])].slice(-20);
             onConflict?.(merged.conflicts[0]);
           }
           metadata.revision = Number(result.current_revision);
+          metadata.lastSyncedState = clone(result.current_state);
           await applyState(merged.state);
           metadata.pending = !equal(merged.state, result.current_state);
           if (!metadata.pending) await acceptSynced(result.current_state, result.current_revision);

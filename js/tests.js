@@ -1,4 +1,4 @@
-import { clone, createDay, createEvent, migrateStateToCurrent, recalculatePlan, selectEvenly, summarizeDay } from "./domain.js";
+import { medicineSchedule, setSlotManualState, solidFoodNutrition, soupNutrition, clone, createDay, createEvent, migrateStateToCurrent, recalculatePlan, selectEvenly, summarizeDay } from "./domain.js";
 import { DEFAULT_SETTINGS } from "./defaults.js";
 import { mergeFamilyStates } from "./sync.js";
 import { getSupabaseClient } from "./supabase-client.js";
@@ -238,6 +238,87 @@ try {
   settings.calorieTargetTenthKcal = 241;
   d = day(settings);
   check("残り24.1 kcalは2回", recalculatePlan(d, morning).recommendedRemainingDoses, 2);
+}
+
+
+{
+  check("固形食: 10g・54粒・29kcalが同じ記録値", [solidFoodNutrition(10, "g").caloriesTenthKcal,
+    solidFoodNutrition(54, "pieces").caloriesTenthKcal, solidFoodNutrition(29).caloriesTenthKcal], [290, 290, 290]);
+  check("固形食: 1粒は0.1kcal単位に四捨五入", solidFoodNutrition(1, "pieces").caloriesTenthKcal, 5);
+  let rejected = false;
+  try { solidFoodNutrition(1.5, "pieces"); } catch { rejected = true; }
+  check("固形食: 小数の粒数を拒否", rejected, true);
+  check("スープ缶: 入力量から0.5kcal/mlで計算", [soupNutrition(15), soupNutrition(3.2)], [
+    { caloriesTenthKcal: 75, countedWaterMl: 15 }, { caloriesTenthKcal: 16, countedWaterMl: 3.2 }
+  ]);
+  const e = createEvent(day(), "SOLID_FOOD", morning.toISOString(), solidFoodNutrition(54, "pieces"));
+  check("固形食: 入力単位のスナップショットを保持", [e.inputAmount, e.inputUnit, e.countedWaterMl], [54, "pieces", 0]);
+}
+
+{
+  const d = day();
+  d.settingsSnapshot.medicine.scheduledTimes = ["07:30", "13:00"];
+  const state = { schemaVersion: 5, settings: clone(d.settingsSnapshot), days: [d], updatedAt: morning.toISOString() };
+  const migrated = migrateStateToCurrent(clone(state));
+  check("薬: 保存・移行後も設定した2時刻を保持", migrated.days[0].settingsSnapshot.medicine.scheduledTimes, ["07:30", "13:00"]);
+  const dose = createEvent(d, "VOMIT_BUSTER", morning.toISOString());
+  dose.medicineScheduledTime = "06:00";
+  dose.medicineDoseIndex = 0;
+  d.events.push(dose);
+  check("薬: 予定時刻変更後も記録済みの1回目を対応付ける", medicineSchedule(d).doses.map((item) => Boolean(item.event)), [true, false]);
+  check("薬: 時刻を変更しても未投与予約水分を保持", summarizeDay(d).reservedMedicineWaterMl, 5);
+}
+
+{
+  const d = day();
+  const legacy = { schemaVersion: 4, settings: clone(DEFAULT_SETTINGS), days: [d], updatedAt: morning.toISOString() };
+  legacy.settings.foods.balanceLiquid.name = "通常セット";
+  legacy.settings.foods.soupSyringe = { caloriesTenthKcal: 40, countedWaterMl: 10 };
+  d.settingsSnapshot.foods.soupSyringe = { caloriesTenthKcal: 40, countedWaterMl: 10 };
+  add(d, "SOUP_SYRINGE");
+  const m = migrateStateToCurrent(clone(legacy));
+  check("schema4移行: 名称を戻し既存の管理水分は保持", [m.schemaVersion, m.settings.foods.balanceLiquid.name, m.settings.foods.balanceLiquid.countedWaterMl], [5, "バランスリキッド", 23]);
+  check("schema4移行: 過去スープの設定と実績を保護", [m.settings.foods.soupSyringe.caloriesTenthKcal, m.days[0].settingsSnapshot.foods.soupSyringe.caloriesTenthKcal, m.days[0].events[0].caloriesTenthKcal], [75, 40, 40]);
+}
+
+{
+  const d = day();
+  const base = { schemaVersion: 5, settings: clone(DEFAULT_SETTINGS), days: [d], updatedAt: morning.toISOString() };
+  const local = clone(base);
+  const remote = clone(base);
+  setSlotManualState(local.days[0].slots[0], "SKIPPED", "休憩", "2026-08-28T00:00:00Z");
+  remote.days[0].slots[0].status = "OVERDUE";
+  remote.days[0].slots[0].updatedAt = "2026-08-28T01:00:00Z";
+  const merged = mergeFamilyStates(remote, local, base);
+  recalculatePlan(merged.state.days[0], at11);
+  check("同期: 後から再計算された予定でもスキップを保持", merged.state.days[0].slots[0].status, "SKIPPED");
+  const reset = clone(merged.state);
+  setSlotManualState(reset.days[0].slots[0], null, "戻す", "2026-08-28T02:00:00Z");
+  const restored = mergeFamilyStates(merged.state, reset, merged.state);
+  recalculatePlan(restored.state.days[0], at11);
+  check("同期: 明示的なスキップ解除も保持", restored.state.days[0].slots[0].status, "OVERDUE");
+  const stamp = d.updatedAt;
+  recalculatePlan(d, at11);
+  check("表示だけの再計算は日次設定の更新時刻を変えない", d.updatedAt, stamp);
+}
+
+{
+  const d = day(); add(d, "BALANCE_LIQUID");
+  const base = { schemaVersion: 5, settings: clone(DEFAULT_SETTINGS), days: [d], updatedAt: morning.toISOString() };
+  const remote = clone(base), local = clone(base);
+  local.days[0].events[0].caloriesTenthKcal = 300;
+  local.days[0].events[0].countedWaterMl = 25;
+  // Clock skew must not discard a change when only one side edited the event.
+  local.days[0].events[0].updatedAt = "2000-01-01T00:00:00Z";
+  const merged = mergeFamilyStates(remote, local, base);
+  check("同期: 片側だけのkcal・水分同時編集を時計差に関係なく保持", [merged.state.days[0].events[0].caloriesTenthKcal, merged.state.days[0].events[0].countedWaterMl], [300, 25]);
+}
+
+{
+  const settings = clone(DEFAULT_SETTINGS);
+  settings.medicine.scheduledTimes = [];
+  const legacy = migrateStateToCurrent({ schemaVersion: 1, settings, days: [] });
+  check("旧schema: 空の薬時刻は2回の既定値へ復元", legacy.settings.medicine.scheduledTimes, ["06:00", "12:00"]);
 }
 
 const passed = results.filter((result) => result.pass).length;

@@ -24,24 +24,18 @@
 
       <main id="main" tabindex="-1">
         <section id="today-view" class="view" aria-labelledby="today-title"></section>
+        <section id="health-view" class="view" aria-labelledby="health-page-title" hidden></section>
         <section id="eyedrops-view" class="view" aria-labelledby="eyedrops-title" hidden></section>
         <section id="history-view" class="view" aria-labelledby="history-title" hidden></section>
         <section id="settings-view" class="view" aria-labelledby="settings-title" hidden></section>
       </main>
 
       <nav class="bottom-nav" aria-label="メインメニュー">
-        <button type="button" data-route="today" class="active" aria-current="page">
-          <span aria-hidden="true">⌂</span><span>今日</span>
-        </button>
-        <button type="button" data-route="history">
-          <span aria-hidden="true">▤</span><span>履歴</span>
-        </button>
-        <button type="button" data-route="eyedrops">
-          <span aria-hidden="true">◉</span><span>点眼</span>
-        </button>
-        <button type="button" data-route="settings">
-          <span aria-hidden="true">⚙</span><span>設定</span>
-        </button>
+        <button type="button" data-route="today" class="active" aria-current="page"><span aria-hidden="true">⌂</span><span>食事</span></button>
+        <button type="button" data-route="health"><span aria-hidden="true">♧</span><span>排泄</span></button>
+        <button type="button" data-route="eyedrops"><span aria-hidden="true">◉</span><span>点眼</span></button>
+        <button type="button" data-route="history"><span aria-hidden="true">▤</span><span>履歴</span></button>
+        <button type="button" data-route="settings"><span aria-hidden="true">⚙</span><span>設定</span></button>
       </nav>
     </div>
 

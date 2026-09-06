@@ -1,6 +1,6 @@
 # べぬケアごはん 実装ガイド
 
-更新日: 2026-09-05
+更新日: 2026-09-06
 
 この文書は、次の開発スレッドや別の実装者が、現在のコードを短時間で理解するための技術資料である。利用者向けの仕様は [`../dogcalplan.md`](../dogcalplan.md)、家族同期の構築・運用手順は [`family-sync-plan.md`](./family-sync-plan.md)、今後の変更要求と引き継ぎ状況は [`dogcalplan_expansion.md`](./dogcalplan_expansion.md) を参照する。
 
@@ -30,7 +30,7 @@ GitHub main
 
 | ファイル | 役割 |
 |---|---|
-| `index.html` | アプリのシェル、4画面用のDOM、起動エラー表示 |
+| `index.html` | アプリのシェル、5画面用のDOM、起動エラー表示 |
 | `styles.css` | モバイル優先の全画面スタイル |
 | `manifest.webmanifest` | PWA名、起動URL、アイコン、表示方法 |
 | `sw.js` | アプリシェルのキャッシュとオフライン応答 |
@@ -76,12 +76,12 @@ state
 
 ### schemaVersionと移行
 
-現在の `SCHEMA_VERSION` は4である。起動時とJSONインポート時に `migrateStateToCurrent()` を通す。
+現在の `SCHEMA_VERSION` は5である。起動時とJSONインポート時に `migrateStateToCurrent()` を通す。
 
 バージョン2以前の「通常セット」は次のように移行する。
 
 - 設定を `foods.balanceLiquid` へ変更する。
-- schema 3の標準将来設定は、通常セット24 kcal／管理水分23 ml（バランスリキッド18 ml＋追加水5 ml）へ移行する。
+- schema 3の標準将来設定は、バランスリキッド24 kcal／管理水分23 ml（バランスリキッド18 ml＋追加水5 ml）へ移行する。
 - 旧イベントの種別は `BALANCE_LIQUID` へ変更する。
 - 既存管理日の設定スナップショットと各イベントが持つ18 ml／23 mlは履歴の正確性のため変更しない。
 
@@ -95,25 +95,25 @@ state
 
 | 項目 | kcal | 管理水分 |
 |---|---:|---:|
-| 通常セット1回 | 24 | 23 ml |
+| バランスリキッド1回 | 24 | 23 ml |
 | 普通の水 | 0 | 入力したml |
 | 固形食 | 入力したkcal | 0 ml |
 | 鶏のスープごはん1食 | 39.9 | 0 ml |
 | ボミットバスター1回 | 0 | 5 ml |
-| スープ缶シリンジ1回 | 4 | 10 ml |
+| スープ缶シリンジ | 入力ml × 0.5 | 入力ml |
 
 重要な不変条件:
 
 - カロリーは0.1 kcal単位の整数で保持する。例: 39.9 kcalは399。
 - 水分上限200 mlを最優先する。
 - 未投与の薬は、1回5 mlを予約水分として計算へ含める。
-- 薬は06:00と12:00の2回固定。
-- 通常セットは不可分の1回単位。
+- 薬は1日2回。初期06:00と12:00、設定から変更できる。
+- バランスリキッドは不可分の1回単位。
 - 完了済み・スキップ済み・失敗済みの過去枠を再計算で変更しない。
 - 未来の通常枠へ必要回数を均等配置し、足りない場合だけ22:00調整枠を使う。
 - 普通の水や固形食も記録直後に未来予定を再計算する。
 
-標準状態では通常セット8回、192 kcal、薬込み194 mlとなる。9回目は217 mlになるため、22:00は調整待ちのままにする。
+標準状態ではバランスリキッド8回、192 kcal、薬込み194 mlとなる。9回目は217 mlになるため、22:00は調整待ちのままにする。
 
 ## 5. 記録操作の実装
 
@@ -126,9 +126,9 @@ state
 どちらも `openSimpleAmountDialog()` を使う。
 
 - `PLAIN_WATER`: 飲水量だけを入力し、カロリーは0。
-- `SOLID_FOOD`: カロリーだけを入力し、管理水分は0。
+- `SOLID_FOOD`: kcal・g・粒のいずれかで入力し、10 g＝54粒＝29 kcalで換算。管理水分は0。
 
-入力時刻は現在時刻で、保存後すぐ予定を再計算する。編集画面でもそれぞれ必要な1項目だけを表示する。
+入力時刻は現在時刻が初期値で変更可能。保存後すぐ予定を再計算する。編集画面でも水分／カロリーと時刻を変更できる。
 
 ### その他
 
@@ -214,7 +214,7 @@ RLSにより、匿名認証済みで、かつ `household_members` に属する�
 
 `main` へのpushで `.github/workflows/pages.yml` が動き、実行に必要なファイルだけをGitHub Pagesへ公開する。仕様書、テストページ、SQLはPages成果物へ含めない。
 
-現在のService Workerキャッシュ名は`benu-care-v6`で、`care.js`と`push-config.js`もアプリシェルに含む。
+現在のService Workerキャッシュ名は`benu-care-v7`で、`care.js`と`push-config.js`もアプリシェルに含む。
 
 アプリ本体を変更した場合は `sw.js` の `CACHE_NAME` を必ず更新する。更新しないと、既存のホーム画面版が古いJavaScriptやCSSを使い続ける可能性がある。
 
@@ -244,7 +244,7 @@ python3 -m http.server 4173
 
 変更時の最低確認:
 
-1. `tests.html` の33件が全件合格する。
+1. `tests.html` の48件が全件合格する。
 2. `git diff --check` が成功する。
 3. 今日画面、履歴、設定がスマートフォン幅で表示できる。
 4. 記録、編集、取消し、再読込み後の復元を確認する。
@@ -284,7 +284,7 @@ python3 -m http.server 4173
 - 招待URLを知っている人は参加できる簡易方式で、個別ログインや4桁PINはない。
 - 参加済み端末や招待トークンをアプリ画面から無効化する管理機能はまだない。
 - Supabaseでは家族全体を1つのJSONとして保存するため、記録量が大きくなった場合は分割テーブル化を検討する。
-- 自動ブラウザE2E環境はなく、UIと実Supabase同期には手動確認が必要。
+- `tests/browser-regression.cjs`でモックを使ったブラウザ回帰を実行できる。実Supabase同期とPushは実機確認が必要。
 - Service Workerはcache-firstであり、更新反映には新しいキャッシュ名と再起動が必要になることがある。
 - Web PushはVAPID鍵、Edge Function Secrets、1分間隔の呼出しを設定するまで動作しない。
 - Edge Functionの日次生成は現在Asia/Tokyoを前提とする。
@@ -292,3 +292,21 @@ python3 -m http.server 4173
 ## 12. 次スレッドへの引き継ぎ
 
 次の変更要求、検討中事項、完了状況は [`dogcalplan_expansion.md`](./dogcalplan_expansion.md) に記録する。スレッド終了時は、コードだけでなく、仕様・実装ガイド・テスト結果・未完了事項が次の担当者から見て一致している状態にする。
+
+## 13. 2026-09-06修正の構成
+
+- `domain.js`: schema5移行、固形食・スープ換算、`setSlotManualState`、薬の`medicineDoseIndex`対応。表示だけの再計算では日次更新日時を変更しない。
+- `app.js`: 5画面と履歴の種類別切替、入力時刻、入力単位、設定下書き保持。ダイアログ保存とUndoで最新stateからIDを引き直す。食事の別日移動は旧イベントのVOIDEDと後継イベントで追跡する。
+- `sync.js`: 片側だけが変更したイベントを時計差に関係なく採用。枠の`manualState`を再計算結果とは別に3-way merge。pullとflushの重複実行を抑え、応答時点で未送信のローカル変更を再比較する。競合応答のマージにも最新stateを使う。
+- `care.js`: 指定日の履歴をページング取得し、古い日を最新200／500件のキャッシュだけで判断しない。排泄編集は期待updated_at付きRPC。
+- `202609060001_edit_health_event_time.sql`: 排泄の時刻編集RPCと`time_edit_history`。家族所属確認、行ロック、取消し拒否、楽観ロック、元記録者保持。既存migrationは変更しない。
+- 固形食の`inputAmount`／`inputUnit`はJSONと明細CSVへ出力する。従来実績は省略可能。スープは新規入力と量編集時だけ固定換算を使う。
+- 実行時ファイル追加はないため、Pagesのコピー対象とAPP_SHELLの追加は不要。キャッシュはv7へ更新。
+
+ブラウザ回帰テストはローカルHTTPサーバーを起動してから、Playwrightが使える環境で実行する。
+
+```bash
+node tests/browser-regression.cjs
+```
+
+必要に応じて`PLAYWRIGHT_MODULE`（Playwright packageのパス）、`BROWSER_EXECUTABLE`（Chromium実行ファイル）、`TEST_BASE_URL`を指定する。Supabaseクライアントはブラウザのリクエスト差替えでモック化し、テストは外部通信を遮断する。本番DBを使わない。

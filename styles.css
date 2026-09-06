@@ -207,7 +207,7 @@ h1, h2, h3, p { margin-top: 0; }
 .join-form { display: grid; gap: .8rem; margin-top: .2rem; }
 .join-form textarea { width: 100%; min-height: 92px; resize: vertical; border: 1px solid #c9cfca; border-radius: 10px; padding: .72rem; color: var(--ink); background: #fff; font-size: .8rem; overflow-wrap: anywhere; }
 
-.bottom-nav { position: fixed; z-index: 20; left: 50%; bottom: 0; display: grid; grid-template-columns: repeat(4, 1fr); width: min(100%, 760px); transform: translateX(-50%); padding: .35rem .75rem calc(.35rem + env(safe-area-inset-bottom)); border-top: 1px solid rgb(41 57 51 / 12%); background: rgb(255 253 248 / 94%); backdrop-filter: blur(16px); }
+.bottom-nav { position: fixed; z-index: 20; left: 50%; bottom: 0; display: grid; grid-template-columns: repeat(5, 1fr); width: min(100%, 760px); transform: translateX(-50%); padding: .35rem .75rem calc(.35rem + env(safe-area-inset-bottom)); border-top: 1px solid rgb(41 57 51 / 12%); background: rgb(255 253 248 / 94%); backdrop-filter: blur(16px); }
 .bottom-nav button { min-height: 56px; border: 0; border-radius: 12px; color: var(--muted); background: transparent; cursor: pointer; }
 .bottom-nav button span { display: block; font-size: .69rem; }
 .bottom-nav button span:first-child { margin-bottom: .1rem; font-size: 1.15rem; }
@@ -241,3 +241,7 @@ h1, h2, h3, p { margin-top: 0; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
 }
+
+.history-filters { display: flex; gap: .5rem; margin-bottom: 1rem; }
+.history-filters button { flex: 1; min-height: 44px; }
+.health-record { display: flex; align-items: center; flex-wrap: wrap; gap: .6rem; padding: .7rem 0; border-bottom: 1px solid var(--line); }
