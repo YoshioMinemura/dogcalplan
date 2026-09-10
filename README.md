@@ -25,8 +25,8 @@ python3 -m http.server 4173
 - 食事JSONのバックアップ／取込み、介護データの閲覧用JSON、日次・明細CSV、全データ消去
 - PWAインストール案内とオフラインキャッシュ
 - 匿名認証と招待URLによる家族間同期、オフライン再送、同時操作の競合警告
-- 小・大のワンタップ排泄記録、操作者表示、Undo、Realtime共有
-- 06:00〜22:00の点眼、担当者排他、5分間隔、担当引き継ぎ
+- 小・大の任意メモ付き排泄記録、履歴での要約・全文表示、操作者表示、Undo、Realtime共有
+- 06:00〜22:00の点眼、直近の回への自動スクロール、担当者排他、5分間隔、担当引き継ぎ
 - 個人別の定時点眼／担当中タイマーWeb Push通知
 
 ## 家族間同期のセットアップ
@@ -58,3 +58,5 @@ Project URLとpublishable keyはブラウザ公開用設定として `js/supabas
 2026-09-06更新: メニューを「食事・排泄・点眼・履歴・設定」へ分離し、履歴も種類別に確認できます。スープ缶はmlから0.5 kcal/mlで換算します。排泄時刻の編集には追加migration [`202609060001_edit_health_event_time.sql`](./supabase/migrations/202609060001_edit_health_event_time.sql) が必要です。適用・公開手順は運用開始手順書を参照してください。
 
 ブラウザ回帰: `node tests/browser-regression.cjs`（Playwrightが必要）。モックで同期中の編集・入力・履歴を確認し、本番Supabaseには接続しません。
+
+2026-09-10更新: 排泄メモの保存・編集には追加migration [`202609100001_health_event_notes.sql`](./supabase/migrations/202609100001_health_event_notes.sql) が必要です。前のmigration適用後に実行し、[運用開始手順書第14節](./docs/production-runbook.md#14-2026-09-10版への更新)に従って公開・端末更新してください。

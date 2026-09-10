@@ -245,3 +245,8 @@ h1, h2, h3, p { margin-top: 0; }
 .history-filters { display: flex; gap: .5rem; margin-bottom: 1rem; }
 .history-filters button { flex: 1; min-height: 44px; }
 .health-record { display: flex; align-items: center; flex-wrap: wrap; gap: .6rem; padding: .7rem 0; border-bottom: 1px solid var(--line); }
+
+.health-note { flex-basis: 100%; min-width: 0; overflow-wrap: anywhere; }
+.health-note summary { cursor: pointer; color: var(--muted); }
+.health-note p { white-space: pre-wrap; margin: .5rem 0; }
+.eye-session { scroll-margin-top: 1rem; }

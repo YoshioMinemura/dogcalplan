@@ -1,10 +1,19 @@
 import { getSupabaseClient } from "./supabase-client.js";
-import { localDateInTimezone } from "./domain.js";
+import { timeInTimezone, localDateInTimezone } from "./domain.js";
 import { VAPID_PUBLIC_KEY } from "./push-config.js";
 
 export const EYE_DROP_TIMES = ["06:00", "08:00", "10:00", "12:00", "14:00", "16:00", "18:00", "20:00", "22:00"];
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
+
+// Select by local wall time; on a tie prefer the earlier session.
+export function nearestEyeSession(sessions, now = new Date(), timezone = "Asia/Tokyo") {
+  const minutes = (time) => Number(time.slice(0, 2)) * 60 + Number(time.slice(3, 5));
+  const current = minutes(timeInTimezone(now, timezone));
+  return [...sessions].sort((a, b) =>
+    Math.abs(minutes(a.scheduled_time) - current) - Math.abs(minutes(b.scheduled_time) - current)
+    || String(a.scheduled_time).localeCompare(String(b.scheduled_time)))[0] || null;
+}
 
 export function secondsUntil(iso, now = Date.now()) {
   if (!iso) return 0;
@@ -210,18 +219,21 @@ export function createCareFeatures({ timezone, localDate, onChange, onMessage })
     await load();
   }
 
-  async function recordHealth(eventType) {
-    const id = crypto.randomUUID();
-    await mutate("record_health_event", {
+  async function recordHealth(eventType, note = "", occurredAt = new Date().toISOString(), id = crypto.randomUUID()) {
+    await mutate("record_health_event_with_note", {
       p_id: id,
       p_event_type: eventType,
-      p_occurred_at: new Date().toISOString()
+      p_occurred_at: occurredAt,
+      p_note: note.trim()
     });
     return id;
   }
 
   const editHealthTime = (id, occurredAt, updatedAt) => mutate("edit_health_event_time", {
     p_event_id: id, p_occurred_at: occurredAt, p_expected_updated_at: updatedAt
+  });
+  const editHealth = (id, occurredAt, note, updatedAt) => mutate("edit_health_event", {
+    p_event_id: id, p_occurred_at: occurredAt, p_note: note.trim(), p_expected_updated_at: updatedAt
   });
   const voidHealth = (id) => mutate("void_health_event", { p_event_id: id });
   const claimSession = (id) => mutate("claim_eye_drop_session", { p_session_id: id });
@@ -336,6 +348,7 @@ export function createCareFeatures({ timezone, localDate, onChange, onMessage })
     reload: load,
     recordHealth,
     editHealthTime,
+    editHealth,
     loadHistory,
     voidHealth,
     claimSession,

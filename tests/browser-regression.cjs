@@ -10,7 +10,7 @@ const today = localDateInTimezone();
 initial.days.push(createDay(today, initial.settings));
 initial.days[0].events.push(createEvent(initial.days[0], 'BALANCE_LIQUID', new Date().toISOString()));
 const health = [{id:'health-1', event_type:'urine', status:'ACTIVE', occurred_at:new Date().toISOString(), updated_at:new Date().toISOString(), recorded_by_name:'家族'}];
-const sessions = [{ id:'eye-1', local_date:today, scheduled_time:'10:00', status:'completed', eye_drop_steps:[{id:'step-1',step_order:1,drop_name:'点眼A',status:'completed',completed_at:new Date().toISOString(),completed_by_name:'家族'}]}];
+const sessions = JSON.parse(localStorage.getItem('test-mock-sessions') || 'null') || [{ id:'eye-1', local_date:today, scheduled_time:'10:00', status:'completed', eye_drop_steps:[{id:'step-1',step_order:1,drop_name:'点眼A',status:'completed',completed_at:new Date().toISOString(),completed_by_name:'家族'}]}];
 const m = window.__mock = { state:initial, revision:1, health, sessions, callbacks:[], saves:0, holdNext:false, held:null };
 const storedCloud = localStorage.getItem('test-mock-cloud'); if(storedCloud){const c=JSON.parse(storedCloud);m.state=c.state;m.revision=c.revision;}
 m.remoteChange = () => { m.state = copy(m.state); m.state.days[0].note = '別端末のメモ'+m.revision; m.state.days[0].updatedAt = new Date().toISOString(); m.revision++; m.callbacks.forEach(fn=>fn({new:{revision:m.revision}})); };
@@ -34,7 +34,8 @@ const client = {
    if(p.p_expected_revision!==m.revision)return {data:[{saved:false,current_revision:m.revision,current_state:copy(m.state)}]};
    m.state=submitted;m.revision++;localStorage.setItem('test-mock-cloud',JSON.stringify({state:m.state,revision:m.revision}));return {data:[{saved:true,current_revision:m.revision}]};
   }
-  if(name==='edit_health_event_time'){const h=health.find(h=>h.id===p.p_event_id);if(h.updated_at!==p.p_expected_updated_at)return {error:{message:'別端末で変更されています'}};h.occurred_at=p.p_occurred_at;h.updated_at=new Date(Date.now()+1000).toISOString();}
+  if(name==='edit_health_event'){const h=health.find(h=>h.id===p.p_event_id);if(h.updated_at!==p.p_expected_updated_at)return {error:{message:'別端末で変更されています'}};h.occurred_at=p.p_occurred_at;h.note=p.p_note;h.updated_at=new Date(Date.now()+1000).toISOString();}
+  if(name==='record_health_event_with_note' && !health.some(h=>h.id===p.p_id))health.unshift({id:p.p_id,event_type:p.p_event_type,occurred_at:p.p_occurred_at,note:p.p_note,status:'ACTIVE',recorded_by_name:'家族',updated_at:new Date().toISOString()});
   if(name==='void_health_event')health.find(h=>h.id===p.p_event_id).status='VOIDED';
   if(name==='save_notification_preferences')return {data:p};
   return {data:null};
@@ -43,7 +44,7 @@ const client = {
 export async function getSupabaseClient(){return client;}
 `;
 (async()=>{
- const browser=await chromium.launch({executablePath:process.env.BROWSER_EXECUTABLE,headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+ const browser=await chromium.launch({downloadsPath:process.env.TEST_DOWNLOADS_PATH,executablePath:process.env.BROWSER_EXECUTABLE,headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
  try {
   const context=await browser.newContext({viewport:{width:390,height:844},timezoneId:'Asia/Tokyo',serviceWorkers:'block'});
   await context.route('**/*', async route=>{
@@ -60,9 +61,89 @@ export async function getSupabaseClient(){return client;}
   const saved = async ()=>{await page.waitForFunction(()=>!document.querySelector('#action-dialog').open);await page.waitForTimeout(600);};
   const sync = async ()=>{await page.waitForFunction(()=>document.querySelector('#save-status').textContent.includes('同期済み'));await page.waitForTimeout(650);};
   const remote = async ()=>{await page.evaluate(()=>window.__mock.remoteChange());await page.waitForTimeout(300);};
+  await page.goto(baseURL+'/tests.html');
+  await page.waitForFunction(()=>document.documentElement.dataset.tests);
+  assert.equal(await page.locator('html').getAttribute('data-tests'),'passed');
+  console.log(await page.locator('#test-summary').innerText());
+  await page.addInitScript(() => {
+    const original = Element.prototype.scrollIntoView;
+    window.__scrolls = [];
+    Element.prototype.scrollIntoView = function(options) {
+      window.__scrolls.push(this.dataset.eyeSessionId); return original.call(this, options);
+    };
+  });
   await page.goto(baseURL);await sync();
   assert.deepEqual(await page.locator('.bottom-nav button span:last-child').allTextContents(),['食事','排泄','点眼','履歴','設定']);
   assert.equal(await page.locator('#today-view [data-health]').count(),0);
+  {
+  // Optional notes: safe text, preview/full text, editing, old records, cancellation and export.
+  await click('.bottom-nav [data-route=health]');
+  await click('[data-health=stool]');
+  const note = '<img src=x onerror="window.noteInjected=true">茶色\n' + 'やわらかい便。'.repeat(20);
+  await page.locator('#health-note').fill(note);
+  await click('#action-form button[type=submit]');await saved();
+  const healthId = await page.evaluate(()=>__mock.health[0].id);
+  assert.equal(await page.evaluate(()=>__mock.health[0].note),note);
+  assert.equal(await page.locator('.health-note img').count(),0);
+  assert.equal(await page.evaluate(()=>window.noteInjected),undefined);
+  await click('.bottom-nav [data-route=history]');await click('[data-history-kind=health]');
+  await page.waitForSelector('#history-view .health-note');
+  assert.match(await page.locator('#history-view .health-note summary').first().innerText(),/…/);
+  await page.locator('#history-view .health-note summary').first().click();
+  assert.equal(await page.locator('#history-view .health-note p').first().innerText(),note);
+  await page.evaluate(()=>{__mock.health[0].occurred_at='2026-09-06T01:00:37.123Z';dispatchEvent(new Event('online'));});
+  await page.waitForTimeout(700);
+  await click(`#history-view [data-edit-health="${healthId}"]`);
+  assert.equal(await page.locator('#health-note').inputValue(),note);
+  await page.locator('#health-note').fill('黄色・形あり');
+  await click('#action-form button[type=submit]');await saved();
+  assert.equal(await page.evaluate(()=>__mock.health[0].note),'黄色・形あり');
+  assert.equal(await page.evaluate(()=>__mock.health[0].occurred_at),'2026-09-06T01:00:37.123Z');
+  await click(`#history-view [data-edit-health="${healthId}"]`);
+  await page.locator('#health-note').fill('競合で保存されないメモ');
+  await page.evaluate(()=>__mock.health[0].updated_at='2099-01-01T00:00:00Z');
+  await click('#action-form button[type=submit]');
+  await page.waitForFunction(()=>document.querySelector('#toast').textContent.includes('別端末'));
+  assert.equal(await page.locator('#health-note').inputValue(),'競合で保存されないメモ');
+  await click('[data-action=close-dialog]');await page.waitForTimeout(600);
+  await click(`#history-view [data-void-health="${healthId}"]`);await page.waitForTimeout(650);
+  assert.equal(await page.evaluate(()=>__mock.health[0].status),'VOIDED');
+  assert.equal(await page.locator('#history-view .health-note summary').first().innerText(),'黄色・形あり（全文）');
+  await click('.bottom-nav [data-route=health]');await click('[data-health=urine]');
+  await click('#action-form button[type=submit]');await saved();
+  assert.equal(await page.evaluate(()=>__mock.health[0].note),'');
+  await click('.bottom-nav [data-route=settings]');
+  const downloadPromise = page.waitForEvent('download');
+  await click('[data-export=care-json]');
+  const download = await downloadPromise;
+  const exported = JSON.parse(require('node:fs').readFileSync(await download.path(),'utf8'));
+  assert.equal(exported.healthEvents.find(h=>h.id===healthId).note,'黄色・形あり');
+  // Several sessions force actual scrolling. Notification target wins over current time.
+  await page.evaluate(()=> {
+    __mock.sessions.splice(0, __mock.sessions.length, ...['06:00','08:00','10:00','12:00','14:00','16:00','18:00','20:00','22:00'].map(time=>({
+      id:'eye-'+time, local_date:__mock.state.days[0].localDate, scheduled_time:time, status:'pending',
+      eye_drop_steps:[{id:'step-'+time,step_order:1,drop_name:'点眼A',status:'pending'}]
+    })));
+    __mock.sessions[0].status='in_progress';
+    localStorage.setItem('test-mock-sessions',JSON.stringify(__mock.sessions));
+    dispatchEvent(new Event('online'));
+  });
+  await page.waitForTimeout(700);
+  await click('.bottom-nav [data-route=eyedrops]');
+  await page.waitForFunction(()=>window.__scrolls.at(-1)==='eye-10:00');
+  assert.ok(await page.evaluate(()=>window.scrollY)>0);
+  const scrollCount = await page.evaluate(()=>window.__scrolls.length);
+  await page.evaluate(()=>{window.scrollTo(0,0);dispatchEvent(new Event('online'));});
+  await page.waitForTimeout(1200);
+  assert.equal(await page.evaluate(()=>window.__scrolls.length),scrollCount);
+  assert.equal(await page.evaluate(()=>window.scrollY),0);
+  await page.goto(baseURL+'/?eyeSession=eye-18:00');await sync();
+  await page.waitForFunction(()=>window.__scrolls.includes('eye-18:00'));
+  await page.goto(baseURL+'/?eyeSession=missing-session');await sync();
+  await page.waitForFunction(()=>window.__scrolls.includes('eye-10:00'));
+  await page.evaluate(()=>localStorage.removeItem('test-mock-sessions'));
+  await page.goto(baseURL);await sync();
+  }
   // Draft must survive remote replacement and sync status notifications.
   await click('.bottom-nav [data-route=settings]');
   await page.locator('[name=dogName]').fill('べぬ変更');await remote();
@@ -163,6 +244,6 @@ export async function getSupabaseClient(){return client;}
   const csv=require('node:fs').readFileSync(await download.path(),'utf8');
   assert.match(csv,/入力単位/);assert.match(csv,/pieces/);
   assert.deepEqual(errors,[]);
-  console.log('Browser regression: PASS (navigation, draft preservation, edit during sync, skip/reset, conversions, in-flight writes, medicine, separate histories, health edit, IndexedDB)');
+  console.log('Browser regression: PASS (navigation, draft preservation, edit during sync, skip/reset, conversions, in-flight writes, medicine, separate histories, health notes/edit/conflict/export, nearest and notification scroll, IndexedDB)');
  } finally {await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1});

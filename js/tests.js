@@ -3,7 +3,7 @@ import { DEFAULT_SETTINGS } from "./defaults.js";
 import { mergeFamilyStates } from "./sync.js";
 import { getSupabaseClient } from "./supabase-client.js";
 import { inviteTokenFromInput } from "./auth.js";
-import { formatCountdown, secondsUntil, validateEyeDropSettings } from "./care.js";
+import { nearestEyeSession, formatCountdown, secondsUntil, validateEyeDropSettings } from "./care.js";
 
 const resultNode = document.querySelector("#test-results");
 const summaryNode = document.querySelector("#test-summary");
@@ -319,6 +319,16 @@ try {
   settings.medicine.scheduledTimes = [];
   const legacy = migrateStateToCurrent({ schemaVersion: 1, settings, days: [] });
   check("旧schema: 空の薬時刻は2回の既定値へ復元", legacy.settings.medicine.scheduledTimes, ["06:00", "12:00"]);
+}
+
+{
+  const sessions = ["06:00", "08:00", "10:00", "12:00", "22:00"].map((scheduled_time) => ({ id: scheduled_time, scheduled_time }));
+  const nearest = (iso) => nearestEyeSession(sessions, new Date(iso), "Asia/Tokyo")?.id;
+  check("点眼: 現在時刻に最も近い回", nearest("2026-09-10T02:40:00Z"), "12:00");
+  check("点眼: 同距離なら直前の回", nearest("2026-09-10T00:00:00Z"), "08:00");
+  check("点眼: 開始前は最初の回", nearest("2026-09-09T20:00:00Z"), "06:00");
+  check("点眼: 終了後は最後の回", nearest("2026-09-10T14:00:00Z"), "22:00");
+  check("点眼: セッションなし", nearestEyeSession([]), null);
 }
 
 const passed = results.filter((result) => result.pass).length;

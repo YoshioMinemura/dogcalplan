@@ -5,7 +5,7 @@ import {
 } from "./domain.js";
 import { clearState, loadState, saveState } from "./db.js";
 import { createFamilySync } from "./sync.js";
-import { createCareFeatures, EYE_DROP_TIMES, formatCountdown, secondsUntil, validateEyeDropSettings } from "./care.js";
+import { createCareFeatures, nearestEyeSession, EYE_DROP_TIMES, formatCountdown, secondsUntil, validateEyeDropSettings } from "./care.js";
 
 const todayView = document.querySelector("#today-view");
 const healthView = document.querySelector("#health-view");
@@ -21,6 +21,7 @@ const toast = document.querySelector("#toast");
 let state;
 let targetEyeSessionId = new URLSearchParams(location.search).get("eyeSession");
 let route = targetEyeSessionId ? "eyedrops" : "today";
+let eyeScrollPending = route === "eyedrops";
 let selectedHistoryDayId = null;
 let historyKind = "food";
 let selectedCareDate = localDateInTimezone();
@@ -242,8 +243,8 @@ function healthQuickHtml() {
   return `<section class="care-section" aria-labelledby="health-title">
     <div class="section-heading"><h3 id="health-title">排泄</h3><span>${offline ? "オンライン復帰後に記録" : "家族へ即時共有"}</span></div>
     <div class="health-actions">
-      <button type="button" class="health-button urine" data-health="urine"${offline ? " disabled" : ""}><strong>小</strong><small>現在時刻で記録</small></button>
-      <button type="button" class="health-button stool" data-health="stool"${offline ? " disabled" : ""}><strong>大</strong><small>現在時刻で記録</small></button>
+      <button type="button" class="health-button urine" data-health="urine"${offline ? " disabled" : ""}><strong>小</strong><small>メモは任意で入力</small></button>
+      <button type="button" class="health-button stool" data-health="stool"${offline ? " disabled" : ""}><strong>大</strong><small>メモは任意で入力</small></button>
     </div>
     <p class="health-latest">最終　小 ${urine ? displayTime(urine.occurred_at, state.settings.timezone) : "—"}　／　大 ${stool ? displayTime(stool.occurred_at, state.settings.timezone) : "—"}</p>
   </section>`;
@@ -289,10 +290,18 @@ function renderEyeDrops() {
     <div class="page-heading"><div><h2 id="eyedrops-title">今日の点眼</h2><p>担当取得と完了操作はオンライン必須です</p></div><span class="date-chip">${careView.online ? "オンライン" : "オフライン"}</span></div>
     ${!careView.online ? alertHtml({ level: "caution", title: "現在オフラインです", message: "共有状態が最新ではない可能性があります。点眼操作はオンライン復帰後に行ってください。" }) : ""}
     <div class="eye-session-list">${sessions.length ? sessions.map((session) => eyeSessionCardHtml(session)).join("") : '<div class="empty-state">本日の点眼セッションはありません。設定画面で点眼内容を登録してください。</div>'}</div>`;
-  if (targetEyeSessionId && sessions.some((session) => session.id === targetEyeSessionId)) {
-    const target = eyedropsView.querySelector(`[data-eye-session-id="${targetEyeSessionId}"]`);
+  if (eyeScrollPending && sessions.length) {
+    const session = sessions.find((item) => item.id === targetEyeSessionId)
+      || nearestEyeSession(sessions, new Date(), state.settings.timezone);
+    const id = session.id;
+    eyeScrollPending = false;
     targetEyeSessionId = null;
-    requestAnimationFrame(() => target?.scrollIntoView({ block: "center" }));
+    requestAnimationFrame(() => {
+      if (route !== "eyedrops") return;
+      const target = [...eyedropsView.querySelectorAll("[data-eye-session-id]")]
+        .find((element) => element.dataset.eyeSessionId === id);
+      target?.scrollIntoView({ block: "start", behavior: "instant" });
+    });
   }
 }
 
@@ -481,7 +490,8 @@ function healthRecordsHtml(events) {
     <time>${displayTime(item.occurred_at, state.settings.timezone)}</time>
     <strong>${item.event_type === "urine" ? "小" : "大"}${item.status === "VOIDED" ? "（取消し）" : ""}</strong>
     <span>${escapeHtml(item.recorded_by_name || "家族")}</span>
-    ${item.status === "ACTIVE" ? `<button type="button" class="link-button" data-edit-health="${item.id}"${!careView.online ? " disabled" : ""}>時刻を編集</button><button type="button" class="link-button" data-void-health="${item.id}"${!careView.online ? " disabled" : ""}>取消し</button>` : ""}
+    ${item.status === "ACTIVE" ? `<button type="button" class="link-button" data-edit-health="${item.id}"${!careView.online ? " disabled" : ""}>時刻・メモを編集</button><button type="button" class="link-button" data-void-health="${item.id}"${!careView.online ? " disabled" : ""}>取消し</button>` : ""}
+    ${item.note ? `<details class="health-note"><summary>${escapeHtml(item.note.replace(/\s+/g, " ").slice(0, 60))}${item.note.length > 60 ? "…" : ""}<span class="slot-meta">（全文）</span></summary><p>${escapeHtml(item.note)}</p></details>` : ""}
   </div>`).join("") : '<p class="empty-state">排泄の記録はありません。</p>';
 }
 
@@ -512,15 +522,38 @@ function renderCareHistory() {
     <section class="panel">${content}</section>`;
 }
 
+function healthNoteField(note = "") {
+  return `<div class="field"><label for="health-note">メモ（任意）</label><textarea id="health-note" name="note" rows="3" maxlength="2000" placeholder="例：茶色、やわらかめ、量は少なめ">${escapeHtml(note)}</textarea></div>`;
+}
+
+function openHealthRecordDialog(type) {
+  const occurredAt = new Date().toISOString();
+  const id = crypto.randomUUID();
+  dialogContent.innerHTML = `<h2 id="dialog-title">${type === "urine" ? "小" : "大"}を記録</h2>
+    <p>${displayTime(occurredAt, state.settings.timezone)}の記録</p>${healthNoteField()}
+    <div class="button-row"><button type="button" class="button" data-action="close-dialog">戻る</button><button type="submit" class="button primary">記録する</button></div>`;
+  pendingDialogAction = async (form) => {
+    await careFeatures.recordHealth(type, form.elements.note.value, occurredAt, id);
+    showToast(`${type === "urine" ? "小" : "大"}を記録しました`,
+      () => runCareMutation(() => careFeatures.voidHealth(id), "排泄記録を取り消しました"));
+  };
+  dialog.showModal();
+}
+
 function openHealthTimeDialog(id) {
-  const item = [...(careView.healthEvents || []), ...(careView.history?.healthEvents || [])].find((event) => event.id === id);
+  const records = route === "history" ? careView.history?.healthEvents : careView.healthEvents;
+  const item = (records || []).find((event) => event.id === id);
   if (!item || item.status !== "ACTIVE") return;
-  dialogContent.innerHTML = `<h2 id="dialog-title">${item.event_type === "urine" ? "小" : "大"}の時刻を編集</h2>
+  dialogContent.innerHTML = `<h2 id="dialog-title">${item.event_type === "urine" ? "小" : "大"}の時刻・メモを編集</h2>
     <div class="field"><label for="health-edit-time">記録時刻</label><input id="health-edit-time" name="occurredAt" type="datetime-local" value="${datetimeLocalValue(item.occurred_at)}" required></div>
+    ${healthNoteField(item.note || "")}
     <div class="button-row"><button type="button" class="button" data-action="close-dialog">戻る</button><button type="submit" class="button primary">変更を保存</button></div>`;
   pendingDialogAction = async (form) => {
-    await careFeatures.editHealthTime(id, new Date(form.elements.occurredAt.value).toISOString(), item.updated_at);
-    showToast("排泄時刻を更新しました");
+    const inputTime = form.elements.occurredAt.value;
+    const occurredAt = inputTime === datetimeLocalValue(item.occurred_at)
+      ? item.occurred_at : new Date(inputTime).toISOString();
+    await careFeatures.editHealth(id, occurredAt, form.elements.note.value, item.updated_at);
+    showToast("排泄記録を更新しました");
   };
   dialog.showModal();
 }
@@ -1029,9 +1062,11 @@ document.addEventListener("click", (event) => {
   if (!target) return;
   if (target.dataset.route) {
     route = target.dataset.route;
+    eyeScrollPending = route === "eyedrops";
+    targetEyeSessionId = null;
     selectedHistoryDayId = null;
     renderApp();
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    if (route !== "eyedrops") window.scrollTo({ top: 0, behavior: "smooth" });
     return;
   }
   if (target.dataset.historyKind) {
@@ -1047,12 +1082,7 @@ document.addEventListener("click", (event) => {
     return;
   }
   if (target.dataset.health) {
-    const type = target.dataset.health;
-    withMutationLock(() => runCareMutation(async () => {
-      const id = await careFeatures.recordHealth(type);
-      showToast(`${type === "urine" ? "小" : "大"}を${displayTime(new Date().toISOString(), state.settings.timezone)}に記録しました`,
-        () => runCareMutation(() => careFeatures.voidHealth(id), "排泄記録を取り消しました"));
-    }));
+    openHealthRecordDialog(target.dataset.health);
     return;
   }
   if (target.dataset.eyeClaim) {

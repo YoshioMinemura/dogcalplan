@@ -1,6 +1,6 @@
 # べぬケアごはん 実装ガイド
 
-更新日: 2026-09-06
+更新日: 2026-09-10
 
 この文書は、次の開発スレッドや別の実装者が、現在のコードを短時間で理解するための技術資料である。利用者向けの仕様は [`../dogcalplan.md`](../dogcalplan.md)、家族同期の構築・運用手順は [`family-sync-plan.md`](./family-sync-plan.md)、今後の変更要求と引き継ぎ状況は [`dogcalplan_expansion.md`](./dogcalplan_expansion.md) を参照する。
 
@@ -214,7 +214,7 @@ RLSにより、匿名認証済みで、かつ `household_members` に属する�
 
 `main` へのpushで `.github/workflows/pages.yml` が動き、実行に必要なファイルだけをGitHub Pagesへ公開する。仕様書、テストページ、SQLはPages成果物へ含めない。
 
-現在のService Workerキャッシュ名は`benu-care-v7`で、`care.js`と`push-config.js`もアプリシェルに含む。
+現在のService Workerキャッシュ名は`benu-care-v8`で、`care.js`と`push-config.js`もアプリシェルに含む。
 
 アプリ本体を変更した場合は `sw.js` の `CACHE_NAME` を必ず更新する。更新しないと、既存のホーム画面版が古いJavaScriptやCSSを使い続ける可能性がある。
 
@@ -244,7 +244,7 @@ python3 -m http.server 4173
 
 変更時の最低確認:
 
-1. `tests.html` の48件が全件合格する。
+1. `tests.html` の53件が全件合格する。
 2. `git diff --check` が成功する。
 3. 今日画面、履歴、設定がスマートフォン幅で表示できる。
 4. 記録、編集、取消し、再読込み後の復元を確認する。
@@ -310,3 +310,15 @@ node tests/browser-regression.cjs
 ```
 
 必要に応じて`PLAYWRIGHT_MODULE`（Playwright packageのパス）、`BROWSER_EXECUTABLE`（Chromium実行ファイル）、`TEST_BASE_URL`を指定する。Supabaseクライアントはブラウザのリクエスト差替えでモック化し、テストは外部通信を遮断する。本番DBを使わない。
+
+## 14. 2026-09-10 排泄メモ・点眼スクロール
+
+- `202609100001_health_event_notes.sql`で`health_events.note`（空文字が既定、2000文字上限）と`note_edit_history`を追加する。`202609060001_edit_health_event_time.sql`の後に適用する。
+- `record_health_event_with_note`はメモを記録と同一トランザクションで保存する。新規ダイアログのUUIDと時刻は開いた時点で固定し、再試行で二重記録しない。重複UUIDへの再送は元記録を保持する。
+- `edit_health_event`は家族所属、行ロック、ACTIVE状態、期待updated_atを検証し、時刻とメモを一括更新する。それぞれ変化した項目だけ監査履歴へ追記する。旧RPCは保持し、旧クライアントの時刻変更でもメモを維持する。
+- 排泄メモは正規化テーブルだけへ追加するため食事stateのschemaVersionは5のまま。既存の`select("*")`による履歴・Realtime再取得・介護JSON出力にメモが含まれる。食事CSVの対象は変えない。
+- `app.js`はメモをHTMLエスケープして60文字の要約と展開可能な全文を描画する。編集フォームは閲覧中の履歴または当日データを参照し、競合時も入力を保持する。メモだけの編集では元の記録時刻の秒・ミリ秒も保持する。
+- `care.js`の`nearestEyeSession`で現在の設定タイムゾーンの最寄り回を選ぶ。`app.js`の`eyeScrollPending`で画面進入時だけ移動し、通知対象があれば優先する。DOM更新後に対象を取り直し、別画面へ移動済みならスクロールしない。
+- 実行時ファイル追加なし。Service Workerキャッシュv8。通知配信・Edge Functionは変更なし。
+
+Snap版Chromiumでダウンロードファイルを読めない場合は、`TEST_DOWNLOADS_PATH`にSnapとテスト実行側の両方から読める作業ディレクトリを指定する。試験用ファイルは終了後に削除する。
