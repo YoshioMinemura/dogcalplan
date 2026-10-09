@@ -72,6 +72,9 @@ function friendlyCareError(error) {
   if (/already claimed by (.+)/i.test(message)) return `この回はすでに${message.match(/already claimed by (.+)/i)?.[1] || "別の家族"}が対応中です`;
   if (/operator only/i.test(message)) return "点眼を完了できるのは現在の担当者だけです";
   if (/too early/i.test(message)) return "5分間隔が経過するまで次の点眼は完了できません";
+  if (/nothing to rewind/i.test(message)) return "戻せる点眼記録がありません";
+  if (error?.code === "PGRST202" || /could not find the function/i.test(message)) return "Supabaseへ追加migrationの適用が必要です";
+  if (/previous step is incomplete/i.test(message)) return "前の点眼が完了していません。画面を再読込みしてください";
   if (/fetch|network|offline/i.test(message)) return "オンライン接続が必要です";
   return message;
 }
@@ -90,6 +93,7 @@ export function createCareFeatures({ timezone, localDate, onChange, onMessage })
     history: { date: null, healthEvents: [], eyeDropSessions: [], loading: false, error: "" },
     eyeDropSettings: null,
     eyeDropSessions: [],
+    healthDailyCounts: null,
     notificationPreferences: {
       master_enabled: false,
       scheduled_eye_drop_enabled: true,
@@ -163,10 +167,22 @@ export function createCareFeatures({ timezone, localDate, onChange, onMessage })
       eye_drop_steps: [...(session.eye_drop_steps || [])].sort((a, b) => a.step_order - b.step_order)
     }));
     if (preferencesResult.data) state.notificationPreferences = preferencesResult.data;
+    await loadHealthDailyCounts();
     state.ready = true;
     state.error = "";
     if (state.history.date) await loadHistory(state.history.date);
     emit();
+  }
+
+  // Counts are supplementary; a missing migration must not block the other care features.
+  async function loadHealthDailyCounts() {
+    const { data, error } = await client.rpc("health_event_daily_counts", { p_timezone: timezone() });
+    if (error || !Array.isArray(data)) {
+      state.healthDailyCounts = null;
+      return;
+    }
+    state.healthDailyCounts = Object.fromEntries(data.map((row) => [String(row.local_date).slice(0, 10),
+      { urine: Number(row.urine_count) || 0, stool: Number(row.stool_count) || 0 }]));
   }
 
   function subscribe() {
@@ -238,6 +254,9 @@ export function createCareFeatures({ timezone, localDate, onChange, onMessage })
   const voidHealth = (id) => mutate("void_health_event", { p_event_id: id });
   const claimSession = (id) => mutate("claim_eye_drop_session", { p_session_id: id });
   const completeStep = (id) => mutate("complete_eye_drop_step", { p_step_id: id });
+  const completeStepNow = (id) => mutate("complete_eye_drop_step_now", { p_step_id: id });
+  const completeSession = (id) => mutate("complete_eye_drop_session", { p_session_id: id });
+  const rewindSession = (id) => mutate("rewind_eye_drop_step", { p_session_id: id });
   const takeoverSession = (id) => mutate("takeover_eye_drop_session", { p_session_id: id });
 
   async function saveEyeDropSettings(dropTypes, templates, intervalSeconds) {
@@ -353,6 +372,9 @@ export function createCareFeatures({ timezone, localDate, onChange, onMessage })
     voidHealth,
     claimSession,
     completeStep,
+    completeStepNow,
+    completeSession,
+    rewindSession,
     takeoverSession,
     saveEyeDropSettings,
     saveDisplayName,

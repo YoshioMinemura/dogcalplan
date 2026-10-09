@@ -35,7 +35,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
     scheduledTimes: ["06:00", "12:00"]
   },
   regularSlotTimes: ["06:00", "08:00", "10:00", "12:00", "14:00", "16:00", "18:00", "20:00"],
-  adjustmentSlotTime: "22:00"
+  adjustmentSlotTime: "22:00",
+  foodPresets: []
 });
 
 export const EVENT_LABELS = {

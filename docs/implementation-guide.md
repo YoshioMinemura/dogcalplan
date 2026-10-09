@@ -1,6 +1,6 @@
 # べぬケアごはん 実装ガイド
 
-更新日: 2026-09-10
+更新日: 2026-10-09
 
 この文書は、次の開発スレッドや別の実装者が、現在のコードを短時間で理解するための技術資料である。利用者向けの仕様は [`../dogcalplan.md`](../dogcalplan.md)、家族同期の構築・運用手順は [`family-sync-plan.md`](./family-sync-plan.md)、今後の変更要求と引き継ぎ状況は [`dogcalplan_expansion.md`](./dogcalplan_expansion.md) を参照する。
 
@@ -214,7 +214,7 @@ RLSにより、匿名認証済みで、かつ `household_members` に属する�
 
 `main` へのpushで `.github/workflows/pages.yml` が動き、実行に必要なファイルだけをGitHub Pagesへ公開する。仕様書、テストページ、SQLはPages成果物へ含めない。
 
-現在のService Workerキャッシュ名は`benu-care-v8`で、`care.js`と`push-config.js`もアプリシェルに含む。
+現在のService Workerキャッシュ名は`benu-care-v9`で、`care.js`と`push-config.js`もアプリシェルに含む。
 
 アプリ本体を変更した場合は `sw.js` の `CACHE_NAME` を必ず更新する。更新しないと、既存のホーム画面版が古いJavaScriptやCSSを使い続ける可能性がある。
 
@@ -244,7 +244,7 @@ python3 -m http.server 4173
 
 変更時の最低確認:
 
-1. `tests.html` の53件が全件合格する。
+1. `tests.html` の67件が全件合格する。
 2. `git diff --check` が成功する。
 3. 今日画面、履歴、設定がスマートフォン幅で表示できる。
 4. 記録、編集、取消し、再読込み後の復元を確認する。
@@ -322,3 +322,26 @@ node tests/browser-regression.cjs
 - 実行時ファイル追加なし。Service Workerキャッシュv8。通知配信・Edge Functionは変更なし。
 
 Snap版Chromiumでダウンロードファイルを読めない場合は、`TEST_DOWNLOADS_PATH`にSnapとテスト実行側の両方から読める作業ディレクトリを指定する。試験用ファイルは終了後に削除する。
+
+## 15. 2026-10-09 カロリー内訳・食品プリセット・点眼操作
+
+- `domain.js`: `summarizeDay()`が`balanceLiquidCaloriesTenthKcal`と`otherCaloriesTenthKcal`を返す。`BUILTIN_SOLID_FOOD`（固定の固形食）、`foodUnitOptions()`、`foodNutrition()`、`normalizeFoodPreset()`を追加し、`solidFoodNutrition()`は標準固形食の`foodNutrition()`として互換を保つ。`daySettingsSnapshot()`で管理日のスナップショットから`foodPresets`を除く。`createEvent()`は`inputUnitLabel`・`foodPresetId`・`foodName`を受け取る。
+- `defaults.js`: 新規stateの`settings.foodPresets`は空配列。既存stateに無い場合も`app.js`の`foodPresets()`で空配列として扱い、移行処理は追加していない。
+- 保存形式: 追加フィールドだけでschemaVersionは5のまま。旧版クライアントは`migrateStateToCurrent()`で必ずschemaVersionを自分の版へ書き戻すため、6へ上げると新旧端末が同時に開いている間、Realtimeを介して保存が往復し続ける。旧版でもプリセット記録は`SOLID_FOOD`として集計・表示でき、設定保存時も`foodPresets`を保持する。
+- `app.js`: 食事画面のゲージを`.progress.split`の2区間で描画。`openSimpleAmountDialog("SOLID_FOOD")`は食品選択→単位→量の順で、食品変更時に既定の単位・量を入れ直す。設定画面の`#food-preset-list`はフォーム下書き中でも差し替え、プリセット編集は`openFoodPresetDialog()`のダイアログで行う。食事画面の同期競合バナーを削除し、競合一覧は設定の同期パネルへ移した。点眼カードに`data-eye-complete-now`・`data-eye-complete-all`・`data-eye-rewind`の操作を追加。明細CSVの末尾に食品名・単位名、日次CSVの末尾にkcal内訳を追加。
+- `care.js`: `completeStepNow()`・`completeSession()`・`rewindSession()`を追加。`load()`で`health_event_daily_counts`を取得し`healthDailyCounts`（日付→小/大）に保持する。RPCが未適用・失敗でも他の介護機能は止めない。
+- `202610090001_eye_drop_controls_health_counts.sql`: `eye_drop_sessions.action_history`を追加し、`complete_eye_drop_step_now`、`complete_eye_drop_session`、`rewind_eye_drop_step`、`health_event_daily_counts`を作成する。既存の`complete_eye_drop_step`は変更していない。各RPCはセッション行をロックし、家族所属と担当者を検証する。未送信の通知ジョブは`cancelled_at`で取り消し、戻した点眼の待機時刻が未来なら通知を再予約する。`202609100001`の後に適用する。
+- `.gitignore`に`supabase/.temp/`を追加し、誤ってコミットされていたSupabase CLIの一時ファイルを追跡対象から外した（ローカルのファイルは残る）。
+- 実行時ファイルの追加なし。キャッシュv9。
+
+ブラウザ回帰はWSLにLinux版Node.jsがない環境では、Windows版Node.jsと既存のPlaywrightパッケージ・Windows版Chromeで実行できる。
+
+```bash
+python3 -m http.server 4173 --bind 127.0.0.1 &
+export PLAYWRIGHT_MODULE='D:\desktop\novelwriter\node_modules\playwright' \
+  BROWSER_EXECUTABLE='C:\Program Files\Google\Chrome\Application\chrome.exe' \
+  TEST_BASE_URL='http://127.0.0.1:4173' WSLENV=PLAYWRIGHT_MODULE:BROWSER_EXECUTABLE:TEST_BASE_URL
+node.exe "$(wslpath -w tests/browser-regression.cjs)"
+```
+
+`PLAYWRIGHT_MODULE`は手元でPlaywrightが入っている任意のフォルダーへ読み替える。

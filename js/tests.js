@@ -1,4 +1,4 @@
-import { medicineSchedule, setSlotManualState, solidFoodNutrition, soupNutrition, clone, createDay, createEvent, migrateStateToCurrent, recalculatePlan, selectEvenly, summarizeDay } from "./domain.js";
+import { BUILTIN_SOLID_FOOD, foodNutrition, foodUnitOptions, normalizeFoodPreset, medicineSchedule, setSlotManualState, solidFoodNutrition, soupNutrition, clone, createDay, createEvent, createInitialState, migrateStateToCurrent, recalculatePlan, selectEvenly, summarizeDay } from "./domain.js";
 import { DEFAULT_SETTINGS } from "./defaults.js";
 import { mergeFamilyStates } from "./sync.js";
 import { getSupabaseClient } from "./supabase-client.js";
@@ -329,6 +329,63 @@ try {
   check("点眼: 開始前は最初の回", nearest("2026-09-09T20:00:00Z"), "06:00");
   check("点眼: 終了後は最後の回", nearest("2026-09-10T14:00:00Z"), "22:00");
   check("点眼: セッションなし", nearestEyeSession([]), null);
+}
+
+{
+  const d = day();
+  add(d, "BALANCE_LIQUID", 3);
+  add(d, "CHICKEN_MEAL");
+  d.events.push(createEvent(d, "SOLID_FOOD", "2026-08-27T23:00:00.000Z", solidFoodNutrition(10, "g")));
+  d.events.push(createEvent(d, "VOMIT_BUSTER", "2026-08-27T23:00:00.000Z"));
+  const voided = createEvent(d, "BALANCE_LIQUID", "2026-08-27T23:00:00.000Z");
+  voided.status = "VOIDED";
+  d.events.push(voided);
+  const s = summarizeDay(d);
+  check("カロリー内訳: リキッドとその他と合計", [s.balanceLiquidCaloriesTenthKcal, s.otherCaloriesTenthKcal, s.actualCaloriesTenthKcal], [720, 689, 1409]);
+  const legacy = day();
+  add(legacy, "NORMAL_SET");
+  check("カロリー内訳: 旧通常セットもリキッドに含める", summarizeDay(legacy).balanceLiquidCaloriesTenthKcal, 240);
+}
+
+{
+  const preset = normalizeFoodPreset({ name: " ささみ ", gram: { amount: "20", kcal: "21" }, piece: { amount: "1", kcal: "12.5", label: "切れ" }, defaultUnit: "pieces", defaultAmount: "1" });
+  check("食品プリセット: 名前・換算・既定値を正規化", [preset.name, preset.gram, preset.piece, preset.defaultUnit, preset.defaultAmount],
+    ["ささみ", { amount: 20, caloriesTenthKcal: 210 }, { amount: 1, caloriesTenthKcal: 125, label: "切れ" }, "pieces", 1]);
+  check("食品プリセット: 選べる単位", foodUnitOptions(preset).map((option) => option.label), ["kcal", "g", "切れ"]);
+  check("食品プリセット: g・個数・kcalから0.1kcal単位で換算", [
+    foodNutrition(preset, 10, "g").caloriesTenthKcal, foodNutrition(preset, 1.5, "pieces").caloriesTenthKcal, foodNutrition(preset, 7, "kcal").caloriesTenthKcal
+  ], [105, 188, 70]);
+  check("食品プリセット: 個数の単位名と水分0をスナップショット", [foodNutrition(preset, 2, "pieces").inputUnitLabel, foodNutrition(preset, 2, "pieces").countedWaterMl], ["切れ", 0]);
+  const kcalOnly = normalizeFoodPreset({ name: "おやつ", gram: { amount: "", kcal: "" }, piece: { amount: "", kcal: "", label: "個" }, defaultUnit: "kcal", defaultAmount: "15" });
+  check("食品プリセット: kcalだけの塊も既定値付きで登録", [kcalOnly.gram, kcalOnly.piece, foodUnitOptions(kcalOnly).length, kcalOnly.defaultAmount], [undefined, undefined, 1, 15]);
+  const rejects = (input, existing = []) => { try { normalizeFoodPreset(input, existing); return false; } catch { return true; } };
+  check("食品プリセット: 不正な入力を拒否", [
+    rejects({ name: "" }),
+    rejects({ name: "固形食" }),
+    rejects({ name: "ささみ" }, [preset]),
+    rejects({ name: "半端", gram: { amount: "10", kcal: "" } }),
+    rejects({ name: "単位なし", defaultUnit: "g" })
+  ], [true, true, true, true, true]);
+  check("食品プリセット: 標準の固形食は従来の換算", [foodNutrition(BUILTIN_SOLID_FOOD, 54, "pieces").caloriesTenthKcal, BUILTIN_SOLID_FOOD.piece.integer], [290, true]);
+  const settings = clone(DEFAULT_SETTINGS);
+  settings.foodPresets = [preset];
+  const d = createDay("2026-10-09", settings, morning);
+  check("食品プリセット: 管理日の設定スナップショットには含めない", "foodPresets" in d.settingsSnapshot, false);
+  const event = createEvent(d, "SOLID_FOOD", "2026-10-09T00:00:00.000Z", { ...foodNutrition(preset, 2, "pieces"), foodPresetId: preset.id, foodName: preset.name });
+  check("食品プリセット: 記録に食品名と栄養値を保存", [event.type, event.foodName, event.caloriesTenthKcal, event.countedWaterMl], ["SOLID_FOOD", "ささみ", 250, 0]);
+  check("食品プリセット: 記録はその他カロリーに入る", (d.events.push(event), summarizeDay(d).otherCaloriesTenthKcal), 250);
+}
+
+{
+  const base = createInitialState();
+  const remote = clone(base), local = clone(base);
+  local.settings.foodPresets = [normalizeFoodPreset({ name: "ささみ", defaultUnit: "kcal" })];
+  local.updatedAt = "2026-10-09T01:00:00.000Z";
+  const merged = mergeFamilyStates(remote, local, base);
+  check("同期: 片側だけで追加した食品プリセットを保持", [merged.state.settings.foodPresets.map((item) => item.name), merged.conflicts.length], [["ささみ"], 0]);
+  const old = clone(base);
+  delete old.settings.foodPresets;
+  check("同期: プリセットのない旧stateも保存形式5のまま扱う", migrateStateToCurrent(old).schemaVersion, 5);
 }
 
 const passed = results.filter((result) => result.pass).length;

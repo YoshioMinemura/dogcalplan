@@ -119,6 +119,13 @@ export function migrateStateToCurrent(loaded) {
   return loaded;
 }
 
+// The food preset catalog is not a nutrition condition, so day snapshots omit it.
+export function daySettingsSnapshot(settings) {
+  const snapshot = clone(settings);
+  delete snapshot.foodPresets;
+  return snapshot;
+}
+
 export function createDay(localDate, settings, now = new Date()) {
   const stamp = now.toISOString();
   const dayId = uid("day");
@@ -136,7 +143,7 @@ export function createDay(localDate, settings, now = new Date()) {
     id: dayId,
     localDate,
     timezone: settings.timezone,
-    settingsSnapshot: clone(settings),
+    settingsSnapshot: daySettingsSnapshot(settings),
     note: "",
     events: [],
     slots,
@@ -182,6 +189,9 @@ export function createEvent(day, type, occurredAt, options = {}) {
     recordedByUserId: options.recordedByUserId || undefined,
     recordedByName: options.recordedByName || undefined,
     inputAmount: options.inputAmount, inputUnit: options.inputUnit,
+    inputUnitLabel: options.inputUnitLabel || undefined,
+    foodPresetId: options.foodPresetId || undefined,
+    foodName: options.foodName || undefined,
     ...nutrition, quantity: 1, note: options.note?.trim() || "",
     status: "ACTIVE", createdAt: stamp, updatedAt: stamp
   };
@@ -191,6 +201,10 @@ export function summarizeDay(day) {
   const settings = day.settingsSnapshot;
   const active = day.events.filter((event) => event.status === "ACTIVE");
   const actualCaloriesTenthKcal = active.reduce((sum, event) => sum + event.caloriesTenthKcal * event.quantity, 0);
+  const balanceLiquidCaloriesTenthKcal = active
+    .filter((event) => ["BALANCE_LIQUID", "NORMAL_SET"].includes(event.type))
+    .reduce((sum, event) => sum + event.caloriesTenthKcal * event.quantity, 0);
+  const otherCaloriesTenthKcal = actualCaloriesTenthKcal - balanceLiquidCaloriesTenthKcal;
   const actualWaterMl = active.reduce((sum, event) => sum + event.countedWaterMl * event.quantity, 0);
   const completedMedicineDoses = active.filter((event) => event.type === "VOMIT_BUSTER").length;
   const remainingMedicineDoses = Math.max(0, settings.medicine.dosesPerDay - completedMedicineDoses);
@@ -200,7 +214,7 @@ export function summarizeDay(day) {
   const chickenMealCount = active.filter((event) => event.type === "CHICKEN_MEAL").length;
   const completedBalanceLiquidDoses = active.filter((event) => ["BALANCE_LIQUID", "NORMAL_SET"].includes(event.type)).length;
   return {
-    actualCaloriesTenthKcal, actualWaterMl, completedMedicineDoses,
+    actualCaloriesTenthKcal, balanceLiquidCaloriesTenthKcal, otherCaloriesTenthKcal, actualWaterMl, completedMedicineDoses,
     remainingMedicineDoses, reservedMedicineWaterMl, projectedCommittedWaterMl,
     safeRemainingWaterMl, chickenMealCount, completedBalanceLiquidDoses
   };
@@ -388,13 +402,78 @@ export function reasonForType(type) {
   return ({ BALANCE_LIQUID: "バランスリキッド完了", PLAIN_WATER: "飲水記録", SOLID_FOOD: "固形食摂取", CHICKEN_MEAL: "鶏ごはん摂取", VOMIT_BUSTER: "薬記録", SOUP_SYRINGE: "スープ缶記録" })[type] || "実績編集";
 }
 
+// The built-in solid food stays fixed at 10 g = 54 pieces = 29 kcal.
+export const BUILTIN_SOLID_FOOD = Object.freeze({
+  id: "solid-food",
+  name: "固形食",
+  gram: Object.freeze({ amount: 10, caloriesTenthKcal: 290 }),
+  piece: Object.freeze({ amount: 54, caloriesTenthKcal: 290, label: "粒", integer: true }),
+  defaultUnit: "kcal"
+});
+
+export function foodUnitOptions(preset) {
+  return [
+    { unit: "kcal", label: "kcal" },
+    ...(preset.gram ? [{ unit: "g", label: "g" }] : []),
+    ...(preset.piece ? [{ unit: "pieces", label: preset.piece.label }] : [])
+  ];
+}
+
 // User input conversions round once into the stored 0.1 kcal integer unit.
-export function solidFoodNutrition(amount, unit = "kcal") {
-  if (!Number.isFinite(amount) || amount <= 0 || !["kcal", "g", "pieces"].includes(unit)) throw new Error("固形食の量を確認してください");
-  if (unit === "pieces" && !Number.isInteger(amount)) throw new Error("粒数は整数で入力してください");
-  const caloriesTenthKcal = Math.round(amount * (unit === "g" ? 29 : unit === "pieces" ? 290 / 54 : 10));
+export function foodNutrition(preset, amount, unit = "kcal") {
+  const conversion = unit === "g" ? preset.gram : unit === "pieces" ? preset.piece : null;
+  if (!Number.isFinite(amount) || amount <= 0 || amount > 10000 || (unit !== "kcal" && !conversion)) {
+    throw new Error(`${preset.name}の量を確認してください`);
+  }
+  if (unit === "pieces" && conversion.integer && !Number.isInteger(amount)) throw new Error(`${conversion.label}数は整数で入力してください`);
+  const caloriesTenthKcal = Math.round(conversion ? amount * conversion.caloriesTenthKcal / conversion.amount : amount * 10);
   if (caloriesTenthKcal < 1 || caloriesTenthKcal > 50000) throw new Error("カロリーは0.1〜5000 kcalの範囲で入力してください");
-  return { caloriesTenthKcal, countedWaterMl: 0, inputAmount: amount, inputUnit: unit };
+  return {
+    caloriesTenthKcal, countedWaterMl: 0, inputAmount: amount, inputUnit: unit,
+    ...(unit === "pieces" ? { inputUnitLabel: conversion.label } : {})
+  };
+}
+
+export function solidFoodNutrition(amount, unit = "kcal") {
+  return foodNutrition(BUILTIN_SOLID_FOOD, amount, unit);
+}
+
+function conversionFromInput(input, label) {
+  const amount = Number(input?.amount);
+  const caloriesTenthKcal = Math.round(Number(input?.kcal) * 10);
+  const empty = (value) => value === undefined || value === null || String(value).trim() === "";
+  if (empty(input?.amount) && empty(input?.kcal)) return null;
+  if (!Number.isFinite(amount) || amount <= 0 || amount > 10000 || !Number.isFinite(caloriesTenthKcal)
+      || caloriesTenthKcal < 1 || caloriesTenthKcal > 50000) {
+    throw new Error(`${label}の換算は量とkcalを両方入力してください`);
+  }
+  return { amount, caloriesTenthKcal };
+}
+
+export function normalizeFoodPreset(input, existing = []) {
+  const name = String(input.name || "").trim();
+  if (!name || name.length > 40) throw new Error("食品名は1〜40文字で入力してください");
+  if (name === BUILTIN_SOLID_FOOD.name || existing.some((item) => item.id !== input.id && item.name === name)) {
+    throw new Error("同じ名前の食品がすでにあります");
+  }
+  const gram = conversionFromInput(input.gram, "g");
+  let piece = conversionFromInput(input.piece, "個数");
+  if (piece) {
+    const label = String(input.piece.label || "").trim() || "個";
+    if (label.length > 6) throw new Error("個数の単位名は6文字以内で入力してください");
+    piece = { ...piece, label };
+  }
+  const preset = { id: input.id || uid("food"), name, defaultUnit: "kcal" };
+  if (gram) preset.gram = gram;
+  if (piece) preset.piece = piece;
+  if (foodUnitOptions(preset).some((option) => option.unit === input.defaultUnit)) preset.defaultUnit = input.defaultUnit;
+  else if (input.defaultUnit && input.defaultUnit !== "kcal") throw new Error("既定の入力単位の換算を入力してください");
+  const defaultAmount = Number(input.defaultAmount);
+  if (String(input.defaultAmount ?? "").trim() !== "") {
+    foodNutrition(preset, defaultAmount, preset.defaultUnit);
+    preset.defaultAmount = defaultAmount;
+  }
+  return preset;
 }
 
 export function soupNutrition(ml) {

@@ -8,6 +8,7 @@ _site/
 !.env.example
 .vercel/
 .supabase/
+supabase/.temp/
 js/supabase-config.local.js
 
 # Local exports and backups

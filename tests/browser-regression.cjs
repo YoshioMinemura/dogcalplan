@@ -38,6 +38,13 @@ const client = {
   if(name==='record_health_event_with_note' && !health.some(h=>h.id===p.p_id))health.unshift({id:p.p_id,event_type:p.p_event_type,occurred_at:p.p_occurred_at,note:p.p_note,status:'ACTIVE',recorded_by_name:'家族',updated_at:new Date().toISOString()});
   if(name==='void_health_event')health.find(h=>h.id===p.p_event_id).status='VOIDED';
   if(name==='save_notification_preferences')return {data:p};
+  if(name==='health_event_daily_counts'){const c={};health.filter(h=>h.status==='ACTIVE').forEach(h=>{const d=localDateInTimezone(new Date(h.occurred_at));c[d]=c[d]||{local_date:d,urine_count:0,stool_count:0};c[d][h.event_type+'_count']++;});return {data:Object.values(c)};}
+  const eye=()=>sessions.find(s=>s.id===p.p_session_id||s.eye_drop_steps.some(st=>st.id===p.p_step_id));
+  if(name==='complete_eye_drop_step_now'){const s=eye();const st=s.eye_drop_steps.find(x=>x.id===p.p_step_id);st.status='completed';st.completed_at=new Date().toISOString();const n=s.eye_drop_steps.find(x=>x.step_order>st.step_order&&x.status!=='completed');if(n){n.status='waiting';n.available_at=new Date(Date.now()+300000).toISOString();}else s.status='completed';}
+  if(name==='complete_eye_drop_session'){const s=eye();s.eye_drop_steps.forEach(x=>{if(x.status!=='completed'){x.status='completed';x.completed_at=new Date().toISOString();}});s.status='completed';s.operator_user_id='user-1';}
+  if(name==='rewind_eye_drop_step'){const s=eye();const done=s.eye_drop_steps.filter(x=>x.status==='completed');const last=done[done.length-1];
+   if(!last){s.status='pending';s.operator_user_id=null;s.operator_display_name=null;s.eye_drop_steps.forEach(x=>{x.status='pending';x.available_at=null;});}
+   else{s.eye_drop_steps.filter(x=>x.step_order>last.step_order).forEach(x=>{x.status='pending';x.available_at=null;});last.status=last.available_at?'waiting':'pending';last.completed_at=null;s.status='in_progress';s.operator_user_id='user-1';}}
   return {data:null};
  }
 };
@@ -144,6 +151,69 @@ export async function getSupabaseClient(){return client;}
   await page.evaluate(()=>localStorage.removeItem('test-mock-sessions'));
   await page.goto(baseURL);await sync();
   }
+  {
+  // Calorie split, food presets, health counts in the meal history and eye-drop controls.
+  assert.match(await page.locator('.hero-breakdown').innerText(),/リキッド 24[\s\S]*その他 0/);
+  assert.doesNotMatch(await page.locator('#today-view').innerText(),/同時操作/);
+  await click('.bottom-nav [data-route=settings]');
+  await click('[data-action=add-food-preset]');
+  await page.locator('#preset-name').fill('<b>ささみ</b>');
+  await page.locator('#preset-piece-label').fill('切れ');
+  await page.locator('#preset-piece-amount').fill('1');
+  await page.locator('#preset-piece-kcal').fill('12.5');
+  await page.locator('#preset-default-unit').selectOption('pieces');
+  await page.locator('#preset-default-amount').fill('2');
+  await click('#action-form button[type=submit]');await saved();await sync();
+  assert.equal(await page.locator('#food-preset-list b').count(),0);
+  assert.match(await page.locator('#food-preset-list').innerText(),/<b>ささみ<\/b>[\s\S]*1 切れ = 12.5 kcal/);
+  await click('.bottom-nav [data-route=today]');
+  await click('[data-record=SOLID_FOOD]');
+  await page.locator('#food-choice').selectOption({label:'<b>ささみ</b>'});
+  assert.deepEqual([await page.locator('#amount-unit').inputValue(),await page.locator('#simple-amount').inputValue()],['pieces','2']);
+  assert.match(await page.locator('#amount-preview').innerText(),/25 kcal/);
+  await click('#action-form button[type=submit]');await saved();await sync();
+  const presetEvent=await page.evaluate(()=>__mock.state.days[0].events.find(e=>e.foodName));
+  assert.deepEqual([presetEvent.type,presetEvent.caloriesTenthKcal,presetEvent.countedWaterMl,presetEvent.inputUnitLabel,presetEvent.foodName],['SOLID_FOOD',250,0,'切れ','<b>ささみ</b>']);
+  assert.equal(await page.evaluate(()=>'foodPresets' in __mock.state.days[0].settingsSnapshot),false);
+  assert.match(await page.locator('.hero-breakdown').innerText(),/リキッド 24[\s\S]*その他 25/);
+  assert.match(await page.locator('#today-view .timeline').innerText(),/<b>ささみ<\/b>[\s\S]*25 kcal（2 切れ）/);
+  await click('.bottom-nav [data-route=health]');await click('[data-health=stool]');
+  await click('#action-form button[type=submit]');await saved();
+  await click('.bottom-nav [data-route=history]');await click('[data-history-kind=food]');
+  const stats=await page.locator('.history-item .history-stats').first().innerText();
+  assert.match(stats,/24 \/ 25 \/ 49/);assert.match(stats,/排泄 小\/大[\s\S]*1 \/ 1/);assert.doesNotMatch(stats,/薬/);
+  const stoolId=await page.evaluate(()=>__mock.health.find(h=>h.event_type==='stool'&&h.status==='ACTIVE').id);
+  await click('.bottom-nav [data-route=health]');await click(`[data-void-health="${stoolId}"]`);await page.waitForTimeout(700);
+  await click('.bottom-nav [data-route=history]');
+  assert.match(await page.locator('.history-item .history-stats').first().innerText(),/排泄 小\/大[\s\S]*1 \/ 0/);
+  await page.evaluate(()=>{
+    const now=Date.now();
+    __mock.sessions.splice(0,__mock.sessions.length,{id:'eye-ctl',local_date:__mock.state.days[0].localDate,scheduled_time:'10:00',status:'in_progress',operator_user_id:'user-1',operator_display_name:'家族',
+      eye_drop_steps:[{id:'s1',step_order:1,drop_name:'A',status:'completed',completed_at:new Date(now-60000).toISOString()},
+        {id:'s2',step_order:2,drop_name:'B',status:'waiting',available_at:new Date(now+240000).toISOString()},{id:'s3',step_order:3,drop_name:'C',status:'pending'}]});
+    dispatchEvent(new Event('online'));
+  });
+  await page.waitForTimeout(700);
+  const steps=()=>page.evaluate(()=>[__mock.sessions[0].status,...__mock.sessions[0].eye_drop_steps.map(s=>s.status)]);
+  await click('.bottom-nav [data-route=eyedrops]');
+  assert.equal(await page.locator('[data-eye-complete]').count(),0);
+  await click('[data-eye-complete-now=s2]');await page.waitForTimeout(700);
+  assert.deepEqual(await steps(),['in_progress','completed','completed','waiting']);
+  await click('[data-eye-rewind=eye-ctl]');await page.waitForTimeout(700);
+  assert.deepEqual(await steps(),['in_progress','completed','waiting','pending']);
+  await click('[data-eye-complete-all=eye-ctl]');await page.waitForTimeout(700);
+  assert.deepEqual(await steps(),['completed','completed','completed','completed']);
+  for(let i=0;i<4;i+=1){await click('[data-eye-rewind=eye-ctl]');await page.waitForTimeout(700);}
+  assert.deepEqual(await steps(),['pending','pending','pending','pending']);
+  assert.deepEqual([await page.locator('[data-eye-claim=eye-ctl]').count(),await page.locator('[data-eye-complete-all=eye-ctl]').count(),await page.locator('[data-eye-rewind=eye-ctl]').count()],[1,1,0]);
+  await click('[data-eye-complete-all=eye-ctl]');await page.waitForTimeout(700);
+  assert.deepEqual(await steps(),['completed','completed','completed','completed']);
+  await click('.bottom-nav [data-route=today]');
+  await click(`[data-edit-event="${presetEvent.id}"]`);
+  assert.match(await page.locator('#dialog-title').innerText(),/<b>ささみ<\/b>の実績/);
+  await click('[data-action=void-event]');await saved();await sync();
+  assert.match(await page.locator('.hero-breakdown').innerText(),/その他 0/);
+  }
   // Draft must survive remote replacement and sync status notifications.
   await click('.bottom-nav [data-route=settings]');
   await page.locator('[name=dogName]').fill('べぬ変更');await remote();
@@ -172,7 +242,7 @@ export async function getSupabaseClient(){return client;}
   await page.locator('#record-time').fill('2026-09-06T08:45');
   assert.match(await page.locator('#amount-preview').innerText(),/29 kcal/);
   await click('#action-form button[type=submit]');await saved();await sync();
-  assert.deepEqual(await page.evaluate(()=>{const e=__mock.state.days[0].events.find(e=>e.type==='SOLID_FOOD');return[e.caloriesTenthKcal,e.inputAmount,e.inputUnit,e.occurredAt]}),[290,54,'pieces','2026-09-05T23:45:00.000Z']);
+  assert.deepEqual(await page.evaluate(()=>{const e=__mock.state.days[0].events.find(e=>e.type==='SOLID_FOOD'&&!e.foodName);return[e.caloriesTenthKcal,e.inputAmount,e.inputUnit,e.occurredAt]}),[290,54,'pieces','2026-09-05T23:45:00.000Z']);
   await click('[data-record=SOUP_SYRINGE]');await page.locator('#simple-amount').fill('12');
   await click('#action-form button[type=submit]');await saved();await sync();
   assert.deepEqual(await page.evaluate(()=>{const e=__mock.state.days[0].events.find(e=>e.type==='SOUP_SYRINGE');return[e.caloriesTenthKcal,e.countedWaterMl]}),[60,12]);
@@ -244,6 +314,6 @@ export async function getSupabaseClient(){return client;}
   const csv=require('node:fs').readFileSync(await download.path(),'utf8');
   assert.match(csv,/入力単位/);assert.match(csv,/pieces/);
   assert.deepEqual(errors,[]);
-  console.log('Browser regression: PASS (navigation, draft preservation, edit during sync, skip/reset, conversions, in-flight writes, medicine, separate histories, health notes/edit/conflict/export, nearest and notification scroll, IndexedDB)');
+  console.log('Browser regression: PASS (calorie split, food presets, history health counts, eye-drop controls, navigation, draft preservation, edit during sync, skip/reset, conversions, in-flight writes, medicine, separate histories, health notes/edit/conflict/export, nearest and notification scroll, IndexedDB)');
  } finally {await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1});
